@@ -3,6 +3,7 @@ import { z } from "zod";
 import { sha256Hex } from "@/lib/crypto";
 import { db } from "@/lib/db/client";
 import { apiKeys, merchants } from "@/lib/db/schema";
+import { logError } from "@/lib/log";
 import { rateLimit } from "@/lib/ratelimit";
 import { ChargeError, type ChargeErrorCode } from "@/lib/services/charges";
 import { MedError, type MedErrorCode } from "@/lib/services/med";
@@ -47,13 +48,14 @@ export const json = (data: unknown, status = 200, headers: Record<string, string
 const fail = (code: ErrorCode, message: string, headers?: Record<string, string>) =>
   json({ error: { code, message } }, STATUS[code], headers);
 
-function errorResponse(err: unknown): Response {
+// Log via logError: erro de query traz params (chave Pix, nome do pagador) e nunca pode ir inteiro para o log.
+function errorResponse(err: unknown, ids: Record<string, string>): Response {
   if (KNOWN.some((E) => err instanceof E)) {
     const { code, message, cause } = err as ApiError;
-    if (STATUS[code] >= 500) console.error(`[api] ${code}`, cause ?? err);
+    if (STATUS[code] >= 500) logError(`api: ${code}`, cause ?? err, ids);
     return fail(code, message);
   }
-  console.error("[api] erro inesperado", err);
+  logError("api: erro inesperado", err, ids);
   return json({ error: { code: "internal_error", message: "Erro interno. Tente de novo em instantes." } }, 500);
 }
 
@@ -93,6 +95,7 @@ export function withApi<P extends Record<string, string> = Record<string, string
   handler: (ctx: { merchantId: string; req: Request; params: P }) => Promise<Response>,
 ) {
   return async (req: Request, { params }: { params: Promise<P> }): Promise<Response> => {
+    const ids: Record<string, string> = {};
     try {
       const token = BEARER.exec(req.headers.get("authorization") ?? "")?.[1];
       const [k] = token
@@ -112,6 +115,7 @@ export function withApi<P extends Record<string, string> = Record<string, string
         : [];
       if (!k) return fail("unauthorized", "Chave de API ausente ou inválida. Envie Authorization: Bearer vk_live_….");
       if (k.revokedAt) return fail("unauthorized", "Esta chave de API foi revogada.");
+      ids.merchant = k.merchantId;
       if (k.ipAllowlist.length) {
         const ip = clientIp(req);
         if (!ip || !k.ipAllowlist.includes(ip)) return fail("forbidden", "Este IP não está na lista de IPs permitidos da chave.");
@@ -130,7 +134,7 @@ export function withApi<P extends Record<string, string> = Record<string, string
       }
       return await handler({ merchantId: k.merchantId, req, params: await params });
     } catch (err) {
-      return errorResponse(err);
+      return errorResponse(err, ids);
     }
   };
 }

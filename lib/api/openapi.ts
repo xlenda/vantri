@@ -93,7 +93,7 @@ const DESCRIPTION = [
   "",
   "## Autenticação",
   "",
-  "Crie a chave no painel e envie em toda requisição: `Authorization: Bearer vk_live_…`. A chave aparece uma vez só (guardamos apenas o hash). Cada chave tem escopos e, se você quiser, uma lista de IPs permitidos; com a lista preenchida, vale o primeiro IP de `X-Forwarded-For`.",
+  "Crie a chave no painel e envie em toda requisição: `Authorization: Bearer vk_live_…`. A chave aparece uma vez só (guardamos apenas o hash). Cada chave tem escopos e, se você quiser, uma lista de IPs permitidos; com a lista preenchida, vale o IP de origem da requisição.",
   "",
   "| Escopo | Permite |",
   "| --- | --- |",

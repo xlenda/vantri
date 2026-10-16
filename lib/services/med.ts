@@ -205,16 +205,17 @@ export async function submitDefense(
 
 /**
  * `merchantId` null = admin (todos os lojistas). Mais recentes primeiro;
- * `cursor` = id do último item da página anterior.
+ * `cursor` = id do último item da página anterior (de outro lojista não acha linha → página vazia).
  */
 export async function listMedCases(
   merchantId: string | null,
   opts: { status?: MedStatus; limit?: number; cursor?: string } = {},
-): Promise<MedCaseRow[]> {
+): Promise<{ data: MedCaseRow[]; nextCursor: string | null }> {
   const { status, cursor } = opts;
   const limit = Number.isInteger(opts.limit) ? Math.min(Math.max(1, opts.limit!), 100) : 50;
   if (cursor !== undefined && !UUID.test(cursor)) throw new MedError("invalid_request", "Cursor inválido.");
-  return db()
+  const sameMerchant = merchantId === null ? sql`` : sql` and mc.merchant_id = ${merchantId}`;
+  const rows = await db()
     .select()
     .from(medCases)
     .where(
@@ -222,12 +223,14 @@ export async function listMedCases(
         merchantId === null ? undefined : eq(medCases.merchantId, merchantId),
         status ? eq(medCases.status, status) : undefined,
         cursor
-          ? sql`(${medCases.createdAt}, ${medCases.id}) < (select created_at, id from med_cases where id = ${cursor})`
+          ? sql`(${medCases.createdAt}, ${medCases.id}) < (select mc.created_at, mc.id from ${medCases} mc where mc.id = ${cursor}${sameMerchant})`
           : undefined,
       ),
     )
     .orderBy(desc(medCases.createdAt), desc(medCases.id))
-    .limit(limit);
+    .limit(limit + 1);
+  const data = rows.slice(0, limit);
+  return { data, nextCursor: rows.length > limit ? data[data.length - 1].id : null };
 }
 
 /** Caso de outro lojista (ou id inválido) → null. `merchantId` null = admin. */

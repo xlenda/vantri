@@ -1,4 +1,4 @@
-import { and, desc, eq, lte, type SQL, sql } from "drizzle-orm";
+import { and, desc, eq, gt, lte, or, type SQL, sql } from "drizzle-orm";
 import QRCode from "qrcode";
 import { z } from "zod";
 import { maskDocument } from "@/lib/br/documents";
@@ -184,19 +184,28 @@ export async function getCharge(merchantId: string, id: string): Promise<ChargeR
   return find(); // relê: pode ter sido paga no meio
 }
 
-/** Mais nova primeiro. `cursor` = id da última da página anterior. */
+/**
+ * Mais nova primeiro. `cursor` = id da última da página anterior. Pendente já vencida sai como `expired`
+ * (igual a `getCharge`), inclusive no filtro; quem grava a mudança é o cron ou o `getCharge`.
+ */
 export async function listCharges(
   merchantId: string,
   opts: { status?: ChargeRow["status"]; limit?: number; cursor?: string } = {},
 ): Promise<{ data: ChargeRow[]; nextCursor: string | null }> {
   const { status, limit, cursor } = parse(listSchema, opts);
+  const now = new Date();
+  const byStatus = {
+    pending: and(eq(charges.status, "pending"), gt(charges.expiresAt, now)),
+    expired: or(eq(charges.status, "expired"), and(eq(charges.status, "pending"), lte(charges.expiresAt, now))),
+    paid: eq(charges.status, "paid"),
+  };
   const rows = await db()
     .select()
     .from(charges)
     .where(
       and(
         eq(charges.merchantId, merchantId),
-        status && eq(charges.status, status),
+        status ? byStatus[status] : undefined,
         // Compara no banco: created_at tem microssegundos, Date do JS só milissegundos.
         // Cursor de outro lojista não acha linha → página vazia.
         cursor
@@ -206,7 +215,9 @@ export async function listCharges(
     )
     .orderBy(desc(charges.createdAt), desc(charges.id))
     .limit(limit + 1);
-  const data = rows.slice(0, limit);
+  const data = rows
+    .slice(0, limit)
+    .map((c) => (c.status === "pending" && c.expiresAt <= now ? { ...c, status: "expired" as const } : c));
   return { data, nextCursor: rows.length > limit ? data[data.length - 1].id : null };
 }
 

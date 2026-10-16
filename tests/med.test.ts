@@ -306,16 +306,24 @@ it("list and get respect the merchant; admin sees all; json has exact fields", a
   const e2 = simulator.simulateMed(a.providerChargeId, 3000);
   await applyMedOpened(e2);
 
+  const amounts = (r: { data: Array<{ amountCents: number }> }) => r.data.map((c) => c.amountCents);
   const mine = await listMedCases(a.merchantId);
-  expect(mine.map((c) => c.amountCents)).toEqual([3000, 1000]);
-  expect((await listMedCases(null)).map((c) => c.amountCents)).toEqual([3000, 2000, 1000]);
-  expect((await listMedCases(null, { status: "open", limit: 1 })).map((c) => c.amountCents)).toEqual([3000]);
-  expect(await listMedCases(null, { status: "defended" })).toEqual([]);
+  expect(amounts(mine)).toEqual([3000, 1000]);
+  expect(mine.nextCursor).toBeNull();
+  expect(amounts(await listMedCases(null))).toEqual([3000, 2000, 1000]);
+  expect(amounts(await listMedCases(null, { status: "open", limit: 1 }))).toEqual([3000]);
+  expect(await listMedCases(null, { status: "defended" })).toEqual({ data: [], nextCursor: null });
   // limit não inteiro cai no padrão (50); fora da faixa é limitado a 1–100.
-  for (const limit of [Number.NaN, 1.5, Infinity]) expect(await listMedCases(null, { limit })).toHaveLength(3);
-  expect(await listMedCases(null, { limit: 0 })).toHaveLength(1);
-  const page2 = await listMedCases(a.merchantId, { limit: 1, cursor: mine[0].id });
-  expect(page2.map((c) => c.amountCents)).toEqual([1000]);
+  for (const limit of [Number.NaN, 1.5, Infinity]) expect((await listMedCases(null, { limit })).data).toHaveLength(3);
+  expect((await listMedCases(null, { limit: 0 })).data).toHaveLength(1);
+  const page1 = await listMedCases(a.merchantId, { limit: 1 });
+  expect(page1.nextCursor).toBe(mine.data[0].id);
+  const page2 = await listMedCases(a.merchantId, { limit: 1, cursor: page1.nextCursor! });
+  expect(amounts(page2)).toEqual([1000]);
+  expect(page2.nextCursor).toBeNull(); // página cheia na última: sem página vazia depois
+  // Caso de outro lojista (mais novo que o de 1000 de `a`) não serve de cursor para `a`.
+  expect(await listMedCases(a.merchantId, { cursor: b.caseId })).toEqual({ data: [], nextCursor: null });
+  expect(amounts(await listMedCases(null, { cursor: b.caseId }))).toEqual([1000]); // admin: cursor global
 
   expect(await getMedCase(a.merchantId, b.caseId)).toBeNull();
   expect(await getMedCase(a.merchantId, "nao-e-uuid")).toBeNull();

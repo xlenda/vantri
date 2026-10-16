@@ -325,3 +325,20 @@ it("listCharges pages newest first, filters by status and stays inside the merch
   await rejects(listCharges(m, { limit: 101 }), "invalid_request");
   await rejects(listCharges(m, { cursor: "lixo" }), "invalid_request");
 });
+
+it("listCharges shows an overdue pending charge as expired, also in the filter, without writing", async () => {
+  const m = await activeMerchant(1);
+  await subscribe(m);
+  const { charge: overdue } = await createCharge(m, { external_ref: "vencida", amount: 1000 });
+  const { charge: open } = await createCharge(m, { external_ref: "valendo", amount: 1000 });
+  await d.update(charges).set({ expiresAt: new Date(Date.now() - 1000) }).where(eq(charges.id, overdue.id));
+
+  const statuses = async (status?: "pending" | "expired") =>
+    Object.fromEntries((await listCharges(m, { status })).data.map((c) => [c.id, c.status]));
+  expect(await statuses()).toEqual({ [overdue.id]: "expired", [open.id]: "pending" });
+  expect(await statuses("pending")).toEqual({ [open.id]: "pending" });
+  expect(await statuses("expired")).toEqual({ [overdue.id]: "expired" });
+  // Só leitura: a linha segue pending e nenhum evento sai (quem grava é o cron ou o getCharge).
+  expect((await d.select().from(charges).where(eq(charges.id, overdue.id)))[0].status).toBe("pending");
+  expect(await deliveries("charge.expired")).toHaveLength(0);
+});

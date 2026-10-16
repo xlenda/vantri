@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { format } from "node:util";
 import { eq } from "drizzle-orm";
 import { beforeAll, beforeEach, expect, it, vi } from "vitest";
 import { GET as balanceGET } from "@/app/api/v1/balance/route";
@@ -16,6 +17,7 @@ import { sha256Hex } from "@/lib/crypto";
 import { type Db, setDb } from "@/lib/db/client";
 import { apiKeys, charges, ledgerEntries, medCases, merchants, payouts } from "@/lib/db/schema";
 import { postEntries } from "@/lib/money/ledger";
+import { simulator } from "@/lib/provider/simulator";
 import { createTestDb } from "./helpers/db";
 import { newMerchant } from "./helpers/factories";
 
@@ -84,6 +86,23 @@ const CHARGE_KEYS = [
   "payer",
   "end_to_end_id",
   "created_at",
+];
+
+/** O que o console escreveria (util.format mostra mensagem e stack de Error; JSON.stringify de Error dá "{}"). */
+const logged = (log: { mock: { calls: unknown[][] } }) => log.mock.calls.map((args) => format(...args)).join("\n");
+
+const PAYOUT_KEYS = [
+  "id",
+  "amount",
+  "fee",
+  "pix_key",
+  "pix_key_type",
+  "description",
+  "status",
+  "failure_code",
+  "end_to_end_id",
+  "created_at",
+  "completed_at",
 ];
 
 const CHARGE = { external_ref: "pedido_1", amount: 14990, description: "Curso" };
@@ -209,10 +228,13 @@ it("GET /payouts/{id} of other merchant → 404", async () => {
   const ok = await call(payoutGET, { key: keyA, id: p.id });
   expect(ok.status).toBe(200);
   expect(ok.json.id).toBe(p.id);
+  expect(Object.keys(ok.json)).toEqual(PAYOUT_KEYS);
   const r = await call(payoutGET, { key: keyB, id: p.id });
   expect(r.status).toBe(404);
   expect(r.json.error.code).toBe("not_found");
-  expect((await call(payoutsGET, { key: keyA })).json.data).toHaveLength(1);
+  const list = (await call(payoutsGET, { key: keyA })).json;
+  expect(list.data).toHaveLength(1);
+  expect(Object.keys(list.data[0])).toEqual(PAYOUT_KEYS);
   expect((await call(payoutsGET, { key: keyB })).json.data).toEqual([]);
 });
 
@@ -280,6 +302,7 @@ it("POST /payouts without Idempotency-Key → 422", async () => {
   const headers = { "idempotency-key": "pedido-saque-0001" };
   const first = await call(payoutsPOST, { key, body: PAYOUT, headers });
   expect(first.status).toBe(201);
+  expect(Object.keys(first.json)).toEqual(PAYOUT_KEYS);
   const again = await call(payoutsPOST, { key, body: PAYOUT, headers });
   expect(again.status).toBe(200);
   expect(again.json.id).toBe(first.json.id);
@@ -372,19 +395,42 @@ it("GET /statement filters by period, paginates and caps the interval at 366 day
   expect((await call(statementGET, { key: await keyFor(m, ["balance:read"]) })).status).toBe(403);
 });
 
-it("unexpected error → 500 generic, logged, no leak", async () => {
+it("unexpected error → 500 generic, logged without the message, no leak", async () => {
   const m = await activeMerchant(1);
   const key = await keyFor(m);
   const log = vi.spyOn(console, "error").mockImplementation(() => {});
   const boom = withApi("balance:read", async () => {
-    throw new Error('relation "segredo_interno" does not exist');
+    throw new Error('Failed query: insert … params: segredo-pix-52998224725,Ana Segredo');
   });
   const r = await call(boom, { key });
   expect(r.status).toBe(500);
   expect(r.json.error.code).toBe("internal_error");
-  expect(JSON.stringify(r.json)).not.toContain("segredo");
+  expect(JSON.stringify(r.json)).not.toContain("egredo");
   expect(log).toHaveBeenCalled();
+  expect(logged(log)).not.toContain("egredo");
+  expect(logged(log)).toContain(m); // contexto: qual lojista
   log.mockRestore();
+});
+
+it("provider_error → 502, cause logged without its message", async () => {
+  const key = await keyFor(await activeMerchant(1));
+  const log = vi.spyOn(console, "error").mockImplementation(() => {});
+  const provider = vi.spyOn(simulator, "createCharge").mockRejectedValue(new Error("token segredo do parceiro"));
+  const r = await call(chargesPOST, { key, body: CHARGE });
+  expect(r.status).toBe(502);
+  expect(r.json.error.code).toBe("provider_error");
+  expect(log).toHaveBeenCalled();
+  expect(logged(log)).not.toContain("segredo");
+  provider.mockRestore();
+  log.mockRestore();
+});
+
+it("GET /charges and GET /charges/{id} agree on an overdue charge", async () => {
+  const key = await keyFor(await activeMerchant(1));
+  const { json } = await call(chargesPOST, { key, body: CHARGE });
+  await d.update(charges).set({ expiresAt: new Date(Date.now() - 1000) }).where(eq(charges.id, json.id));
+  expect((await call(chargesGET, { key })).json.data[0].status).toBe("expired");
+  expect((await call(chargeGET, { key, id: json.id })).json.status).toBe("expired");
 });
 
 it("last_used_at is updated at most once per minute", async () => {
