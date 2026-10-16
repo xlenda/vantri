@@ -1,28 +1,14 @@
 import { beforeEach, expect, it } from "vitest";
 import type { Db } from "@/lib/db/client";
-import { charges, ledgerEntries, merchants } from "@/lib/db/schema";
+import { charges, ledgerEntries } from "@/lib/db/schema";
 import { createTestDb } from "./helpers/db";
+import { newMerchant } from "./helpers/factories";
 
 let d: Db;
 
 beforeEach(async () => {
   d = await createTestDb();
 });
-
-async function newMerchant(n: number): Promise<string> {
-  const [m] = await d
-    .insert(merchants)
-    .values({
-      legalName: `Loja ${n} LTDA`,
-      tradeName: `Loja ${n}`,
-      documentType: "cnpj",
-      documentEnc: "v1:x:y:z",
-      documentHash: `hash-${n}`,
-      segment: "cursos",
-    })
-    .returning({ id: merchants.id });
-  return m.id;
-}
 
 function charge(merchantId: string, n: number) {
   return {
@@ -48,13 +34,13 @@ async function expectUniqueViolation(p: Promise<unknown>) {
 }
 
 it("rejects duplicate external_ref per merchant", async () => {
-  const m = await newMerchant(1);
+  const m = await newMerchant(d, 1);
   await d.insert(charges).values(charge(m, 1));
   await expectUniqueViolation(d.insert(charges).values(charge(m, 2)));
 });
 
 it("rejects duplicate ledger entry for same kind/ref/bucket", async () => {
-  const m = await newMerchant(1);
+  const m = await newMerchant(d, 1);
   const entry = {
     merchantId: m,
     amountCents: 14990,
@@ -68,8 +54,8 @@ it("rejects duplicate ledger entry for same kind/ref/bucket", async () => {
 });
 
 it("allows same external_ref for different merchants", async () => {
-  const a = await newMerchant(1);
-  const b = await newMerchant(2);
+  const a = await newMerchant(d, 1);
+  const b = await newMerchant(d, 2);
   await d.insert(charges).values(charge(a, 1));
   await d.insert(charges).values(charge(b, 2));
   expect(await d.$count(charges)).toBe(2);
