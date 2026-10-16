@@ -1,0 +1,257 @@
+import { and, desc, eq, lte, type SQL, sql } from "drizzle-orm";
+import QRCode from "qrcode";
+import { z } from "zod";
+import { maskDocument } from "@/lib/br/documents";
+import { randomBase62 } from "@/lib/crypto";
+import { db } from "@/lib/db/client";
+import { charges, merchants } from "@/lib/db/schema";
+import { computeFee } from "@/lib/money/fees";
+import { lockMerchant, postEntries } from "@/lib/money/ledger";
+import { getProvider } from "@/lib/provider";
+import type { ProviderEvent } from "@/lib/provider/types";
+import { emit } from "@/lib/services/events";
+
+export type ChargeRow = typeof charges.$inferSelect;
+
+// merchant_inactive: lojista que não está `active` (a API responde 403).
+export type ChargeErrorCode =
+  | "invalid_request"
+  | "idempotency_conflict"
+  | "not_found"
+  | "provider_error"
+  | "merchant_inactive";
+
+export class ChargeError extends Error {
+  constructor(
+    public readonly code: ChargeErrorCode,
+    message: string,
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+    this.name = "ChargeError";
+  }
+}
+
+const MIN_AMOUNT = 100;
+const MAX_AMOUNT = 10_000_000;
+
+const createSchema = z.strictObject({
+  external_ref: z.string().min(1).max(64),
+  amount: z.int(),
+  description: z.string().max(140).optional(),
+  expires_in: z.int().min(300).max(86_400).default(3600),
+});
+
+const listSchema = z.strictObject({
+  status: z.enum(["pending", "paid", "expired"]).optional(),
+  limit: z.int().min(1).max(100).default(20),
+  cursor: z.uuid().optional(),
+});
+
+function parse<T extends z.ZodType>(schema: T, input: unknown): z.output<T> {
+  const r = schema.safeParse(input);
+  if (r.success) return r.data;
+  const i = r.error.issues[0];
+  const msg =
+    i.code === "unrecognized_keys"
+      ? `Campo não permitido: ${i.keys.join(", ")}.`
+      : `Campo inválido: ${i.path.join(".") || "entrada"}.`;
+  throw new ChargeError("invalid_request", msg);
+}
+
+const isUuid = (s: string) => z.uuid().safeParse(s).success;
+
+/** JSON público da cobrança (API e webhooks). Webhook usa `withQr: false` e o campo some. */
+export async function toChargeJson(c: ChargeRow, { withQr }: { withQr: boolean }) {
+  return {
+    id: c.id,
+    txid: c.txid,
+    external_ref: c.externalRef,
+    amount: c.amountCents,
+    fee: c.feeCents,
+    net: c.amountCents - c.feeCents,
+    description: c.description,
+    status: c.status,
+    brcode: c.brcode,
+    ...(withQr && { qr_code_base64: (await QRCode.toBuffer(c.brcode)).toString("base64") }),
+    expires_at: c.expiresAt.toISOString(),
+    paid_at: c.paidAt?.toISOString() ?? null,
+    payer:
+      c.payerName === null && c.payerDocumentMasked === null
+        ? null
+        : { name: c.payerName, document_masked: c.payerDocumentMasked },
+    end_to_end_id: c.endToEndId,
+    created_at: c.createdAt.toISOString(),
+  };
+}
+
+const findByRef = async (merchantId: string, externalRef: string) =>
+  (
+    await db()
+      .select()
+      .from(charges)
+      .where(and(eq(charges.merchantId, merchantId), eq(charges.externalRef, externalRef)))
+  )[0];
+
+function replay(existing: ChargeRow, amount: number) {
+  if (existing.amountCents !== amount) {
+    throw new ChargeError("idempotency_conflict", "Já existe uma cobrança com este external_ref e outro valor.");
+  }
+  return { charge: existing, created: false };
+}
+
+export async function createCharge(
+  merchantId: string,
+  input: unknown,
+): Promise<{ charge: ChargeRow; created: boolean }> {
+  const data = parse(createSchema, input);
+  if (data.amount < MIN_AMOUNT) throw new ChargeError("invalid_request", "O valor mínimo da cobrança é R$ 1,00.");
+  if (data.amount > MAX_AMOUNT) {
+    throw new ChargeError("invalid_request", "O valor máximo da cobrança é R$ 100.000,00.");
+  }
+
+  const [m] = isUuid(merchantId) ? await db().select().from(merchants).where(eq(merchants.id, merchantId)) : [];
+  if (m?.status !== "active" || !m.providerAccountId) {
+    throw new ChargeError("merchant_inactive", "Sua conta não está ativa para receber cobranças.");
+  }
+
+  const existing = await findByRef(merchantId, data.external_ref);
+  if (existing) return replay(existing, data.amount);
+
+  const fee = computeFee(data.amount, m.feeInBps, m.feeInFixedCents);
+  if (data.amount <= fee) throw new ChargeError("invalid_request", "O valor da cobrança precisa ser maior que a taxa.");
+
+  const txid = randomBase62(25); // campo 62/05 do BR Code aceita no máximo 25
+  let created: { providerChargeId: string; brcode: string };
+  try {
+    created = await getProvider().createCharge({
+      providerAccountId: m.providerAccountId,
+      amountCents: data.amount,
+      txid,
+      description: data.description,
+      expiresInSec: data.expires_in,
+    });
+  } catch (cause) {
+    throw new ChargeError("provider_error", "Não foi possível gerar a cobrança no parceiro de Pix. Tente novamente.", {
+      cause,
+    });
+  }
+
+  // Corrida: dois pedidos com o mesmo external_ref passam pela checagem acima juntos. O UNIQUE decide;
+  // quem perde não grava e relê a do vencedor.
+  // ponytail: a cobrança do perdedor fica órfã no provedor e só expira lá; inofensivo, ninguém recebe o brcode dela.
+  const [row] = await db()
+    .insert(charges)
+    .values({
+      merchantId,
+      txid,
+      externalRef: data.external_ref,
+      amountCents: data.amount,
+      feeCents: fee,
+      description: data.description ?? null,
+      status: "pending",
+      brcode: created.brcode,
+      providerChargeId: created.providerChargeId,
+      expiresAt: new Date(Date.now() + data.expires_in * 1000),
+    })
+    .onConflictDoNothing({ target: [charges.merchantId, charges.externalRef] })
+    .returning();
+  if (row) return { charge: row, created: true };
+  return replay((await findByRef(merchantId, data.external_ref))!, data.amount);
+}
+
+/** Pendente vencida → `expired` + `charge.expired`, numa transação. */
+// ponytail: tudo numa transação só, sem limite de linhas; fatiar em lotes se o cron começar a pegar milhares.
+async function expire(now: Date, filter?: SQL): Promise<number> {
+  return db().transaction(async (tx) => {
+    const rows = await tx
+      .update(charges)
+      .set({ status: "expired" })
+      .where(and(eq(charges.status, "pending"), lte(charges.expiresAt, now), filter))
+      .returning();
+    for (const r of rows) await emit(tx, r.merchantId, "charge.expired", await toChargeJson(r, { withQr: false }));
+    return rows.length;
+  });
+}
+
+export const expireDueCharges = (now = new Date()): Promise<number> => expire(now);
+
+/** De outro lojista (ou id inválido) → null. */
+export async function getCharge(merchantId: string, id: string): Promise<ChargeRow | null> {
+  if (!isUuid(id)) return null;
+  const find = async () =>
+    (await db()
+      .select()
+      .from(charges)
+      .where(and(eq(charges.id, id), eq(charges.merchantId, merchantId))))[0] ?? null;
+  const c = await find();
+  const now = new Date();
+  if (c?.status !== "pending" || c.expiresAt > now) return c;
+  await expire(now, eq(charges.id, id));
+  return find(); // relê: pode ter sido paga no meio
+}
+
+/** Mais nova primeiro. `cursor` = id da última da página anterior. */
+export async function listCharges(
+  merchantId: string,
+  opts: { status?: ChargeRow["status"]; limit?: number; cursor?: string } = {},
+): Promise<{ data: ChargeRow[]; nextCursor: string | null }> {
+  const { status, limit, cursor } = parse(listSchema, opts);
+  const rows = await db()
+    .select()
+    .from(charges)
+    .where(
+      and(
+        eq(charges.merchantId, merchantId),
+        status && eq(charges.status, status),
+        // Compara no banco: created_at tem microssegundos, Date do JS só milissegundos.
+        cursor
+          ? sql`(${charges.createdAt}, ${charges.id}) < (select c.created_at, c.id from ${charges} c where c.id = ${cursor})`
+          : undefined,
+      ),
+    )
+    .orderBy(desc(charges.createdAt), desc(charges.id))
+    .limit(limit + 1);
+  const data = rows.slice(0, limit);
+  return { data, nextCursor: rows.length > limit ? data[data.length - 1].id : null };
+}
+
+const DUPLICATE = Symbol("duplicate");
+
+/** Crédito único: `postEntries` repetido desfaz a transação inteira (nem o status nem o evento mudam). */
+export async function applyChargePaid(
+  e: Extract<ProviderEvent, { type: "charge.paid" }>,
+): Promise<"credited" | "duplicate" | "unknown"> {
+  const [c] = await db()
+    .select({ id: charges.id, merchantId: charges.merchantId })
+    .from(charges)
+    .where(eq(charges.providerChargeId, e.providerChargeId));
+  if (!c) return "unknown";
+  try {
+    return await db().transaction(async (tx) => {
+      await lockMerchant(tx, c.merchantId);
+      const [row] = await tx
+        .update(charges)
+        .set({
+          status: "paid", // inclusive se estava expired: o dinheiro entrou
+          paidAt: e.paidAt,
+          endToEndId: e.endToEndId,
+          payerName: e.payerName ?? null,
+          payerDocumentMasked: e.payerDocument ? maskDocument(e.payerDocument) : null,
+        })
+        .where(eq(charges.id, c.id))
+        .returning();
+      const ref = { merchantId: c.merchantId, bucket: "available", refType: "charge", refId: c.id } as const;
+      const posted = await postEntries(tx, [
+        { ...ref, kind: "cash_in", amountCents: row.amountCents },
+        { ...ref, kind: "fee_in", amountCents: -row.feeCents },
+      ]);
+      if (!posted) throw DUPLICATE;
+      await emit(tx, c.merchantId, "charge.paid", await toChargeJson(row, { withQr: false }));
+      return "credited" as const;
+    });
+  } catch (err) {
+    if (err === DUPLICATE) return "duplicate";
+    throw err;
+  }
+}
