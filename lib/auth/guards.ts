@@ -1,36 +1,24 @@
-import { eq } from "drizzle-orm";
 import { cookies } from "next/headers";
 import { notFound, redirect } from "next/navigation";
-import { resolveSession, SESSION_COOKIE, type SessionInfo } from "@/lib/auth/session";
-import { db } from "@/lib/db/client";
-import { merchants } from "@/lib/db/schema";
+import { type Access, checkAccess, resolveSession, SESSION_COOKIE, type SessionInfo } from "@/lib/auth/session";
+
+async function sessionToken(): Promise<string | undefined> {
+  return (await cookies()).get(SESSION_COOKIE)?.value;
+}
 
 export async function getSession(): Promise<SessionInfo | null> {
-  const token = (await cookies()).get(SESSION_COOKIE)?.value;
+  const token = await sessionToken();
   return token ? resolveSession(token) : null;
 }
 
 /**
- * Para páginas e ações do painel/admin. Ordem: sessão → 2FA configurado → 2FA desta sessão →
- * troca de senha obrigatória → papel. As próprias páginas /conta/2fa, /entrar/2fa e /conta/senha
- * não podem chamar isto (redirecionariam para si mesmas): usam getSession().
+ * Para páginas e ações do painel/admin; a decisão (e a ordem) está em checkAccess.
+ * As próprias páginas /conta/2fa, /entrar/2fa e /conta/senha não podem chamar isto
+ * (redirecionariam para si mesmas): usam getSession().
  */
-export async function requireUser(opts: { role: "admin" | "merchant" }): Promise<{
-  user: SessionInfo["user"];
-  merchant?: typeof merchants.$inferSelect;
-}> {
-  const s = await getSession();
-  if (!s) redirect("/entrar");
-  const { user, session } = s;
-  if (!user.totpEnabled) redirect("/conta/2fa");
-  if (!session.mfaPassed) redirect("/entrar/2fa");
-  if (user.mustChangePassword) redirect("/conta/senha");
-  if (user.role !== opts.role) notFound();
-  if (user.role === "admin") return { user };
-
-  const [merchant] = user.merchantId
-    ? await db().select().from(merchants).where(eq(merchants.id, user.merchantId))
-    : [];
-  if (!merchant) notFound();
-  return { user, merchant };
+export async function requireUser(opts: { role: "admin" | "merchant" }): Promise<Omit<Extract<Access, { kind: "ok" }>, "kind">> {
+  const r = await checkAccess(await sessionToken(), opts.role);
+  if (r.kind === "redirect") redirect(r.to);
+  if (r.kind === "not_found") notFound();
+  return { user: r.user, merchant: r.merchant };
 }

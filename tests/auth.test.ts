@@ -7,6 +7,7 @@ import { hashPassword, verifyPassword } from "@/lib/auth/password";
 import {
   beginTotpSetup,
   changePassword,
+  checkAccess,
   confirmTotpSetup,
   login,
   logout,
@@ -206,12 +207,31 @@ describe("totp", () => {
     const code = await generate({ secret, epoch: NOW });
     expect(await passTotp(token, code)).toBe(false); // ainda não confirmado
     expect(await verifyUserTotp(id, code)).toBe(false);
-    expect(await confirmTotpSetup(id, "000000")).toBe(false);
-    expect(await confirmTotpSetup(id, code)).toBe(true);
+    expect(await confirmTotpSetup(id, "000000", token)).toBe(false);
+    expect(await confirmTotpSetup(id, code, token)).toBe(true);
     [u] = await d.select().from(users).where(eq(users.id, id));
     expect(u.totpEnabled).toBe(true);
     expect(await passTotp(token, code)).toBe(false); // mesmo código, mesmo passo
     await expect(beginTotpSetup(id)).rejects.toThrow(/2FA/); // ativo não é sobrescrito
+  });
+
+  it("confirmTotpSetup marks the session mfa_passed", async () => {
+    const id = await newUser("m@x.com");
+    await newUser("outro@x.com");
+    const { secret } = await beginTotpSetup(id);
+    const token = await loginToken("m@x.com");
+    const other = await loginToken("m@x.com");
+    const stranger = await loginToken("outro@x.com");
+    const code = await generate({ secret, epoch: NOW });
+
+    // Token de outro usuário não confirma nada (e não consome o código).
+    expect(await confirmTotpSetup(id, code, stranger)).toBe(false);
+    expect((await d.select().from(users).where(eq(users.id, id)))[0].totpEnabled).toBe(false);
+
+    expect(await confirmTotpSetup(id, code, token)).toBe(true);
+    expect((await resolveSession(token))?.session.mfaPassed).toBe(true);
+    expect((await resolveSession(other))?.session.mfaPassed).toBe(false); // só a sessão atual
+    expect((await resolveSession(stranger))?.session.mfaPassed).toBe(false);
   });
 });
 
@@ -232,13 +252,43 @@ it("rateLimit blocks 21st call in window", async () => {
 it("changePassword rejects wrong current", async () => {
   const id = await newUser("p@x.com", { mustChange: true });
   const before = (await d.select().from(users).where(eq(users.id, id)))[0].passwordHash;
-  expect(await changePassword(id, "errada", "nova-senha-456")).toBe(false);
+  const token = await loginToken("p@x.com");
+  expect(await changePassword(id, "errada", "nova-senha-456", token)).toBe(false);
   expect((await d.select().from(users).where(eq(users.id, id)))[0].passwordHash).toBe(before);
 
-  expect(await changePassword(id, PASS, "nova-senha-456")).toBe(true);
+  expect(await changePassword(id, PASS, "nova-senha-456", token)).toBe(true);
   const [u] = await d.select().from(users).where(eq(users.id, id));
   expect(await verifyPassword(u.passwordHash, "nova-senha-456")).toBe(true);
   expect(u.mustChangePassword).toBe(false);
+});
+
+it("changePassword revokes other sessions", async () => {
+  const id = await newUser("v@x.com");
+  await newUser("w@x.com");
+  const [t1, keep, t3] = [await loginToken("v@x.com"), await loginToken("v@x.com"), await loginToken("v@x.com")];
+  const someoneElse = await loginToken("w@x.com");
+
+  expect(await changePassword(id, "errada", "nova-senha-456", keep)).toBe(false);
+  expect(await d.select().from(sessions)).toHaveLength(4); // senha errada não derruba nada
+
+  expect(await changePassword(id, PASS, "nova-senha-456", keep)).toBe(true);
+  expect(await resolveSession(keep)).not.toBeNull();
+  expect(await resolveSession(t1)).toBeNull();
+  expect(await resolveSession(t3)).toBeNull();
+  expect(await resolveSession(someoneElse)).not.toBeNull(); // só as do próprio usuário
+});
+
+it("merchant suspended after login is rejected on next request", async () => {
+  const m = await activeMerchant(9);
+  await newUser("z@x.com", { role: "merchant", merchantId: m, totp: true });
+  const token = await loginToken("z@x.com");
+  await d.update(sessions).set({ mfaPassed: true });
+  expect(await checkAccess(token, "merchant")).toMatchObject({ kind: "ok", merchant: { id: m } });
+
+  await d.update(merchants).set({ status: "suspended" }).where(eq(merchants.id, m));
+  expect(await checkAccess(token, "merchant")).toEqual({ kind: "redirect", to: "/entrar?motivo=suspenso" });
+  expect(await resolveSession(token)).toBeNull(); // sessão apagada
+  expect(await checkAccess(token, "merchant")).toEqual({ kind: "redirect", to: "/entrar" });
 });
 
 it("requireUser redirects in order and checks role", async () => {

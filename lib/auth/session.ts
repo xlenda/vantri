@@ -1,4 +1,4 @@
-import { and, eq, gt, isNull, lt, or, sql } from "drizzle-orm";
+import { and, eq, gt, isNull, lt, ne, or, sql } from "drizzle-orm";
 import { hashPassword, verifyPassword } from "@/lib/auth/password";
 import { checkTotpStep, newTotpSecret, totpUri } from "@/lib/auth/totp";
 import { decrypt, encrypt, randomToken, sha256Hex } from "@/lib/crypto";
@@ -145,18 +145,63 @@ export async function beginTotpSetup(userId: string): Promise<{ secret: string; 
   return { secret, uri: totpUri(secret, u.email) };
 }
 
-export function confirmTotpSetup(userId: string, code: string): Promise<boolean> {
-  return consumeTotp(userId, code, false);
+/** Confirma o segredo novo e já marca a sessão atual (`token`, do próprio usuário) como 2FA feito. */
+export async function confirmTotpSetup(userId: string, code: string, token: string): Promise<boolean> {
+  const s = await resolveSession(token);
+  if (s?.user.id !== userId || !(await consumeTotp(userId, code, false))) return false;
+  await db().update(sessions).set({ mfaPassed: true }).where(eq(sessions.id, s.session.id));
+  return true;
 }
 
-export async function changePassword(userId: string, current: string, next: string): Promise<boolean> {
+/** Troca a senha e derruba as outras sessões do usuário; a de `keepToken` continua. */
+export async function changePassword(
+  userId: string,
+  current: string,
+  next: string,
+  keepToken: string,
+): Promise<boolean> {
   const [u] = await db().select({ hash: users.passwordHash }).from(users).where(eq(users.id, userId));
   if (!u || !(await verifyPassword(u.hash, current))) return false;
-  await db()
-    .update(users)
-    .set({ passwordHash: await hashPassword(next), mustChangePassword: false })
-    .where(eq(users.id, userId));
+  const passwordHash = await hashPassword(next);
+  await db().transaction(async (tx) => {
+    await tx.update(users).set({ passwordHash, mustChangePassword: false }).where(eq(users.id, userId));
+    await tx.delete(sessions).where(and(eq(sessions.userId, userId), ne(sessions.id, sha256Hex(keepToken))));
+  });
   return true;
+}
+
+type Merchant = typeof merchants.$inferSelect;
+export type Access =
+  | { kind: "ok"; user: SessionInfo["user"]; merchant?: Merchant }
+  | { kind: "redirect"; to: string }
+  | { kind: "not_found" };
+
+/**
+ * Decisão dos guardas, sem next/headers (requireUser em ./guards.ts só traduz o resultado).
+ * Ordem: sessão → lojista ativo → 2FA configurado → 2FA desta sessão → troca de senha → papel.
+ * Lojista que deixou de estar ativo perde a sessão na hora, em qualquer página.
+ */
+export async function checkAccess(token: string | undefined, role: "admin" | "merchant"): Promise<Access> {
+  const s = token ? await resolveSession(token) : null;
+  if (!s) return { kind: "redirect", to: "/entrar" };
+  const { user, session } = s;
+
+  let merchant: Merchant | undefined;
+  if (user.role === "merchant") {
+    [merchant] = user.merchantId
+      ? await db().select().from(merchants).where(eq(merchants.id, user.merchantId))
+      : [];
+    if (merchant?.status !== "active") {
+      await db().delete(sessions).where(eq(sessions.id, session.id));
+      return { kind: "redirect", to: "/entrar?motivo=suspenso" };
+    }
+  }
+
+  if (!user.totpEnabled) return { kind: "redirect", to: "/conta/2fa" };
+  if (!session.mfaPassed) return { kind: "redirect", to: "/entrar/2fa" };
+  if (user.mustChangePassword) return { kind: "redirect", to: "/conta/senha" };
+  if (user.role !== role) return { kind: "not_found" };
+  return { kind: "ok", user, merchant };
 }
 
 export async function logout(token: string): Promise<void> {
