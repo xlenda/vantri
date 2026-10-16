@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { onlyDigits } from "./documents";
+import { normalizeDocument } from "./documents";
 
 export type CnpjLookup = { ok: true; legalName: string; cnaes: string[]; active: boolean } | { ok: false };
 
@@ -15,7 +15,7 @@ const body = z.object({
 /** Qualquer falha (rede, timeout, não-200, corpo inesperado) vira `{ ok: false }`: o cadastro segue para revisão manual. */
 export async function lookupCnpj(cnpj: string, fetcher: typeof fetch = fetch): Promise<CnpjLookup> {
   try {
-    const res = await fetcher(`https://brasilapi.com.br/api/cnpj/v1/${onlyDigits(cnpj)}`, {
+    const res = await fetcher(`https://brasilapi.com.br/api/cnpj/v1/${normalizeDocument(cnpj)}`, {
       signal: AbortSignal.timeout(5000),
     });
     if (res.status !== 200) return { ok: false };

@@ -4,7 +4,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import { verifyPassword } from "@/lib/auth/password";
 import { lookupCnpj } from "@/lib/br/cnpj-lookup";
 import { isValidCnpj, isValidCpf, maskDocument } from "@/lib/br/documents";
-import { decrypt, sha256Hex } from "@/lib/crypto";
+import { decrypt, hmacHex, sha256Hex } from "@/lib/crypto";
 import { type Db, setDb } from "@/lib/db/client";
 import { auditLog, merchants, users } from "@/lib/db/schema";
 import { simulator } from "@/lib/provider/simulator";
@@ -89,11 +89,24 @@ describe("documents", () => {
     expect(isValidCnpj("11222333000181")).toBe(true);
     expect(isValidCnpj("11222333000180")).toBe(false);
     expect(isValidCnpj("00000000000000")).toBe(false);
+    // CNPJ alfanumérico (Receita, desde jul/2026): letra vale código ASCII − 48; DVs continuam numéricos.
+    expect(isValidCnpj("12ABC34501DE35")).toBe(true);
+    expect(isValidCnpj("12ABC34501DE36")).toBe(false);
+    expect(isValidCnpj("12ABC34501DEA5")).toBe(false);
+    expect(isValidCpf("5299822472A")).toBe(false);
   });
 
   it("mascara CPF e CNPJ", () => {
     expect(maskDocument("12345678901")).toBe("***.456.789-**");
     expect(maskDocument("12345678000195")).toBe("12.345.678/****-**");
+    expect(maskDocument("12.abc.345/01de-35")).toBe("12.ABC.345/****-**");
+  });
+
+  it("hmacHex é determinístico, separado por finalidade e não é sha256 puro", () => {
+    expect(hmacHex("document", CPF)).toMatch(/^[0-9a-f]{64}$/);
+    expect(hmacHex("document", CPF)).toBe(hmacHex("document", CPF));
+    expect(hmacHex("document", CPF)).not.toBe(hmacHex("outra", CPF));
+    expect(hmacHex("document", CPF)).not.toBe(sha256Hex(CPF));
   });
 });
 
@@ -116,6 +129,9 @@ describe("lookupCnpj", () => {
     });
     expect(String(fetcher.mock.calls[0][0])).toBe("https://brasilapi.com.br/api/cnpj/v1/11222333000181");
     expect(fetcher.mock.calls[0][1]?.signal).toBeInstanceOf(AbortSignal);
+
+    await lookupCnpj("12.abc.345/01de-35", fetcher);
+    expect(String(fetcher.mock.calls[1][0])).toBe("https://brasilapi.com.br/api/cnpj/v1/12ABC34501DE35");
   });
 
   it("devolve ok:false em 404, erro de rede ou corpo inesperado", async () => {
@@ -170,11 +186,23 @@ describe("signupMerchant", () => {
     const [m] = await d.select().from(merchants).where(eq(merchants.id, merchantId));
     expect(m.documentEnc).not.toContain(CPF);
     expect(decrypt(m.documentEnc)).toBe(CPF);
-    expect(m.documentHash).toBe(sha256Hex(CPF));
+    expect(m.documentHash).toBe(hmacHex("document", CPF));
     expect(m).toMatchObject({ status: "pending", needsManualReview: false, providerAccountId: null, feeInBps: 149 });
     const [u] = await d.select().from(users).where(eq(users.id, userId));
     expect(u).toMatchObject({ role: "merchant", merchantId, mustChangePassword: false });
     expect(await verifyPassword(u.passwordHash, "senha-bem-longa-123")).toBe(true);
+  });
+
+  it("signup aceita CNPJ alfanumérico e grava a forma normalizada", async () => {
+    const lookup = vi.fn(lookupOk(["8599604"]));
+    const { merchantId } = await signupMerchant(cnpjInput({ document: "12.abc.345/01de-35" }), { lookup });
+    expect(lookup).toHaveBeenCalledWith("12ABC34501DE35");
+    const [m] = await d.select().from(merchants).where(eq(merchants.id, merchantId));
+    expect(decrypt(m.documentEnc)).toBe("12ABC34501DE35");
+    expect(m.documentHash).toBe(hmacHex("document", "12ABC34501DE35"));
+
+    const upper = cnpjInput({ document: "12ABC34501DE35", email: "outra@exemplo.com" });
+    expect(await errorCode(signupMerchant(upper, { lookup }))).toBe("document_taken");
   });
 
   it("signup with lookup down sets needs_manual_review", async () => {
@@ -237,7 +265,11 @@ describe("admin", () => {
   it("approve com provedor fora do ar deixa o lojista pending", async () => {
     vi.spyOn(simulator, "createAccount").mockRejectedValueOnce(new Error("provedor fora do ar"));
     const { merchantId } = await signupMerchant(cpfInput());
-    await expect(approveMerchant(merchantId, adminId)).rejects.toThrow("provedor fora do ar");
+    await expect(approveMerchant(merchantId, adminId)).rejects.toMatchObject({
+      code: "provider_error",
+      message: "Não foi possível abrir a conta no parceiro. Tente de novo.",
+      cause: { message: "provedor fora do ar" },
+    });
     const [m] = await d.select().from(merchants).where(eq(merchants.id, merchantId));
     expect(m).toMatchObject({ status: "pending", providerAccountId: null, approvedAt: null });
     expect(await actions()).toEqual([]);
@@ -265,8 +297,30 @@ describe("admin", () => {
 
   it("adminCreateMerchant com provedor fora do ar não grava nada", async () => {
     vi.spyOn(simulator, "createAccount").mockRejectedValueOnce(new Error("provedor fora do ar"));
-    await expect(adminCreateMerchant(adminInput(), adminId)).rejects.toThrow("provedor fora do ar");
+    expect(await errorCode(adminCreateMerchant(adminInput(), adminId))).toBe("provider_error");
     expect(await counts()).toEqual({ merchants: 0, users: 0 });
+  });
+
+  it("adminCreateMerchant nunca ativa CNPJ sem a checagem de apostas", async () => {
+    const spy = vi.spyOn(simulator, "createAccount");
+    const input = adminInput({ legalName: "Escola Online LTDA", documentType: "cnpj", document: CNPJ });
+
+    const betting = { lookup: lookupOk(["8599604", "9200399"]) };
+    expect(await errorCode(adminCreateMerchant(input, adminId, betting))).toBe("betting_cnae");
+
+    const down = { lookup: async () => ({ ok: false }) as const };
+    await expect(adminCreateMerchant(input, adminId, down)).rejects.toMatchObject({
+      code: "cnpj_lookup_unavailable",
+      message: "Não foi possível consultar o CNPJ na Receita agora. Tente de novo em instantes.",
+    });
+
+    expect(spy).not.toHaveBeenCalled();
+    expect(await counts()).toEqual({ merchants: 0, users: 0 });
+    expect(await actions()).toEqual([]);
+
+    const ok = await adminCreateMerchant(input, adminId, { lookup: lookupOk(["8599604"]) });
+    const [m] = await d.select().from(merchants).where(eq(merchants.id, ok.merchantId));
+    expect(m).toMatchObject({ status: "active", needsManualReview: false });
   });
 
   it("reject, suspend e reactivate só a partir do status certo", async () => {

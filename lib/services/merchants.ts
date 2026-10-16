@@ -2,8 +2,8 @@ import { asc, eq } from "drizzle-orm";
 import { z } from "zod";
 import { hashPassword } from "@/lib/auth/password";
 import { lookupCnpj } from "@/lib/br/cnpj-lookup";
-import { isValidCnpj, isValidCpf, onlyDigits, SEGMENTS } from "@/lib/br/documents";
-import { decrypt, encrypt, randomBase62, sha256Hex } from "@/lib/crypto";
+import { isValidCnpj, isValidCpf, normalizeDocument, onlyDigits, SEGMENTS } from "@/lib/br/documents";
+import { decrypt, encrypt, hmacHex, randomBase62 } from "@/lib/crypto";
 import { db, type Tx } from "@/lib/db/client";
 import { auditLog, merchants, users } from "@/lib/db/schema";
 import { getProvider } from "@/lib/provider";
@@ -15,17 +15,20 @@ export type MerchantErrorCode =
   | "segment_not_allowed"
   | "betting_cnae"
   | "cnpj_inactive"
+  | "cnpj_lookup_unavailable"
   | "document_taken"
   | "email_taken"
   | "not_found"
-  | "invalid_status";
+  | "invalid_status"
+  | "provider_error";
 
 export class MerchantError extends Error {
   constructor(
     public readonly code: MerchantErrorCode,
     message: string,
+    options?: ErrorOptions,
   ) {
-    super(message);
+    super(message, options);
     this.name = "MerchantError";
   }
 }
@@ -62,25 +65,25 @@ function parse<T extends z.ZodType>(schema: T, input: unknown): z.output<T> {
 
 type MerchantInput = z.output<typeof adminCreateSchema>;
 
-/** Regras de quem pode ser cliente. Devolve o documento só com dígitos. */
+/** Regras de quem pode ser cliente. Devolve o documento normalizado (maiúsculas, sem pontuação). */
 async function vet(data: MerchantInput, lookup: typeof lookupCnpj) {
   if (!(SEGMENTS as readonly string[]).includes(data.segment)) {
     throw new MerchantError("segment_not_allowed", "Segmento não atendido.");
   }
-  const digits = onlyDigits(data.document);
+  const doc = normalizeDocument(data.document);
   const isCpf = data.documentType === "cpf";
-  if (!/^[\d.\-/\s]+$/.test(data.document) || !(isCpf ? isValidCpf(digits) : isValidCnpj(digits))) {
+  if (!(isCpf ? isValidCpf(doc) : isValidCnpj(doc))) {
     throw new MerchantError("invalid_document", isCpf ? "CPF inválido." : "CNPJ inválido.");
   }
-  if (isCpf) return { digits, needsManualReview: false };
+  if (isCpf) return { doc, needsManualReview: false };
 
-  const r = await lookup(digits);
-  if (!r.ok) return { digits, needsManualReview: true }; // BrasilAPI fora do ar: segue, admin revisa
+  const r = await lookup(doc);
+  if (!r.ok) return { doc, needsManualReview: true }; // BrasilAPI fora do ar: cadastro segue, admin revisa
   if (r.cnaes.some((c) => onlyDigits(c).startsWith("9200"))) {
     throw new MerchantError("betting_cnae", "Não atendemos apostas.");
   }
   if (!r.active) throw new MerchantError("cnpj_inactive", "CNPJ não está ativo na Receita Federal.");
-  return { digits, needsManualReview: false };
+  return { doc, needsManualReview: false };
 }
 
 type DbError = { code?: string; constraint?: string; constraint_name?: string; cause?: unknown };
@@ -102,7 +105,7 @@ function rethrowTaken(e: unknown): never {
 async function insertMerchant(
   tx: Tx,
   data: MerchantInput,
-  v: { digits: string; needsManualReview: boolean },
+  v: { doc: string; needsManualReview: boolean },
   user: { passwordHash: string; mustChangePassword: boolean },
 ) {
   const [m] = await tx
@@ -111,8 +114,8 @@ async function insertMerchant(
       legalName: data.legalName,
       tradeName: data.tradeName,
       documentType: data.documentType,
-      documentEnc: encrypt(v.digits),
-      documentHash: sha256Hex(v.digits),
+      documentEnc: encrypt(v.doc),
+      documentHash: hmacHex("document", v.doc),
       segment: data.segment,
       needsManualReview: v.needsManualReview,
     })
@@ -127,7 +130,11 @@ async function insertMerchant(
 // ponytail: a chamada ao provedor roda dentro da transação (conexão presa pela latência dele). Em troca, falha no
 // provedor desfaz tudo e o FOR UPDATE impede abrir duas contas. Status "provisioning" + fila se a latência pesar.
 async function provision(tx: Tx, account: Parameters<PixProvider["createAccount"]>[0]) {
-  const { providerAccountId } = await getProvider().createAccount(account);
+  const { providerAccountId } = await getProvider()
+    .createAccount(account)
+    .catch((cause: unknown) => {
+      throw new MerchantError("provider_error", "Não foi possível abrir a conta no parceiro. Tente de novo.", { cause });
+    });
   await tx
     .update(merchants)
     .set({ status: "active", providerAccountId, approvedAt: new Date() })
@@ -152,9 +159,17 @@ export async function signupMerchant(
 export async function adminCreateMerchant(
   input: unknown,
   actorId: string,
+  deps: { lookup?: typeof lookupCnpj } = {},
 ): Promise<{ merchantId: string; email: string; tempPassword: string }> {
   const data = parse(adminCreateSchema, input);
-  const v = await vet(data, lookupCnpj);
+  const v = await vet(data, deps.lookup ?? lookupCnpj);
+  // Aqui o cliente já nasce ativo: sem a consulta, a checagem de apostas não rodou.
+  if (v.needsManualReview) {
+    throw new MerchantError(
+      "cnpj_lookup_unavailable",
+      "Não foi possível consultar o CNPJ na Receita agora. Tente de novo em instantes.",
+    );
+  }
   const tempPassword = randomBase62(16);
   const passwordHash = await hashPassword(tempPassword);
   const { merchantId } = await db()
@@ -163,7 +178,7 @@ export async function adminCreateMerchant(
       await provision(tx, {
         merchantId: ids.merchantId,
         legalName: data.legalName,
-        document: v.digits,
+        document: v.doc,
         documentType: data.documentType,
         email: data.email,
       });

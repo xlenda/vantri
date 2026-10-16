@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes, randomInt } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, randomInt } from "node:crypto";
 
 const BASE62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
@@ -35,6 +35,16 @@ export function decrypt(enc: string): string {
 
 export function sha256Hex(s: string): string {
   return createHash("sha256").update(s).digest("hex");
+}
+
+/**
+ * HMAC-SHA256 determinístico para índice único de dado pessoal (CPF/CNPJ): sem a chave, não dá para testar o espaço
+ * de documentos por força bruta. Subchave por finalidade = HMAC(APP_ENCRYPTION_KEY, "vantri:" + purpose).
+ * Trocar a APP_ENCRYPTION_KEY muda todos os hashes (recalcular a coluna junto com a recifragem).
+ */
+export function hmacHex(purpose: string, value: string): string {
+  const subkey = createHmac("sha256", key()).update(`vantri:${purpose}`).digest();
+  return createHmac("sha256", subkey).update(value).digest("hex");
 }
 
 export function randomToken(bytes = 32): string {
