@@ -1,6 +1,6 @@
 import { and, asc, desc, eq, lt, sql } from "drizzle-orm";
 import { z } from "zod";
-import { isValidCnpj, isValidCpf } from "@/lib/br/documents";
+import { isValidCnpj, isValidCpf, normalizeDocument } from "@/lib/br/documents";
 import { sha256Hex } from "@/lib/crypto";
 import { db, type Tx } from "@/lib/db/client";
 import { merchants, payouts } from "@/lib/db/schema";
@@ -9,6 +9,7 @@ import { getBalance, type LedgerEntry, lockMerchant, postEntries } from "@/lib/m
 import { getProvider } from "@/lib/provider";
 import type { PixKeyType, PixProvider } from "@/lib/provider/types";
 import { emit } from "@/lib/services/events";
+import { parseOr } from "@/lib/validation";
 
 export type PayoutRow = typeof payouts.$inferSelect;
 type PayoutResult = { status: PayoutRow["status"]; failureCode?: string; endToEndId?: string };
@@ -56,7 +57,7 @@ function normalizeKey(type: PixKeyType, key: string): string | null {
   switch (type) {
     case "cpf":
     case "cnpj": {
-      const d = k.replace(/[.\-/\s]/g, "").toUpperCase();
+      const d = normalizeDocument(k);
       return (type === "cpf" ? isValidCpf(d) : isValidCnpj(d)) ? d : null;
     }
     case "email":
@@ -75,26 +76,11 @@ const payoutSchema = z.strictObject({
   description: z.string().max(140).optional(),
 });
 
-const FIELD_MSG: Record<string, string> = {
-  amount: "O valor do saque deve ser um número inteiro de centavos entre 100 e 5000000.",
-  pix_key: "Chave Pix inválida.",
-  pix_key_type: "Tipo de chave Pix inválido (use cpf, cnpj, email, phone ou evp).",
-  description: "A descrição deve ter no máximo 140 caracteres.",
-};
-
 function parse(input: unknown): z.output<typeof payoutSchema> {
-  const r = payoutSchema.safeParse(input);
-  if (!r.success) {
-    const i = r.error.issues[0];
-    const msg =
-      i.code === "unrecognized_keys"
-        ? `Campo não permitido: ${i.keys.join(", ")}.`
-        : (FIELD_MSG[String(i.path[0])] ?? "Corpo da requisição inválido.");
-    throw new PayoutError("invalid_request", msg);
-  }
-  const pixKey = normalizeKey(r.data.pix_key_type, r.data.pix_key);
-  if (!pixKey) throw new PayoutError("invalid_request", `Chave Pix inválida para o tipo ${r.data.pix_key_type}.`);
-  return { ...r.data, pix_key: pixKey };
+  const data = parseOr(payoutSchema, input, (msg) => new PayoutError("invalid_request", msg));
+  const pixKey = normalizeKey(data.pix_key_type, data.pix_key);
+  if (!pixKey) throw new PayoutError("invalid_request", `Chave Pix inválida para o tipo ${data.pix_key_type}.`);
+  return { ...data, pix_key: pixKey };
 }
 
 // Sentinela: lançamento que já existia desfaz a transação inteira (nunca grava meio lote).
@@ -130,6 +116,18 @@ export async function createPayout(
 
   const res = await db().transaction(async (tx) => {
     await lockMerchant(tx, merchantId);
+    // Replay antes da checagem de status: saque já feito volta igual mesmo se o lojista foi suspenso depois.
+    const [existing] = await tx
+      .select()
+      .from(payouts)
+      .where(and(eq(payouts.merchantId, merchantId), eq(payouts.idempotencyKey, idempotencyKey)));
+    if (existing) {
+      if (existing.requestHash !== requestHash) {
+        throw new PayoutError("idempotency_conflict", "Idempotency-Key já usada com outro conteúdo.");
+      }
+      return { payout: existing, replayed: true as const };
+    }
+
     const [m] = await tx
       .select({
         status: merchants.status,
@@ -142,17 +140,6 @@ export async function createPayout(
     if (!m) throw new PayoutError("not_found", "Cliente não encontrado.");
     if (m.status !== "active" || !m.providerAccountId) {
       throw new PayoutError("merchant_inactive", "Conta não está ativa para saques.");
-    }
-
-    const [existing] = await tx
-      .select()
-      .from(payouts)
-      .where(and(eq(payouts.merchantId, merchantId), eq(payouts.idempotencyKey, idempotencyKey)));
-    if (existing) {
-      if (existing.requestHash !== requestHash) {
-        throw new PayoutError("idempotency_conflict", "Idempotency-Key já usada com outro conteúdo.");
-      }
-      return { payout: existing, replayed: true, providerAccountId: m.providerAccountId };
     }
 
     const fee = computeFee(data.amount, m.feeOutBps, m.feeOutFixedCents);
@@ -180,9 +167,9 @@ export async function createPayout(
       { ...ref, kind: "cash_out", amountCents: -p.amountCents },
       { ...ref, kind: "fee_out", amountCents: -p.feeCents },
     ]);
-    return { payout: p, replayed: false, providerAccountId: m.providerAccountId };
+    return { payout: p, replayed: false as const, providerAccountId: m.providerAccountId };
   });
-  if (res.replayed) return { payout: res.payout, replayed: true };
+  if (res.replayed) return res;
 
   try {
     await submit(provider, res.payout, res.providerAccountId);
@@ -195,7 +182,11 @@ export async function createPayout(
 
 /** Só processing→completed e processing→failed; o resto é ignorado. failed estorna amount+fee uma única vez. */
 export async function applyPayoutResult(payoutId: string, r: PayoutResult): Promise<void> {
-  if (r.status === "processing") return;
+  // Só "completed"/"failed" explícitos mexem em algo; status desconhecido nunca estorna dinheiro.
+  if (r.status !== "completed" && r.status !== "failed") {
+    if (r.status !== "processing") console.error(`saque ${payoutId}: status desconhecido do provedor, ignorado`);
+    return;
+  }
   try {
     await db().transaction(async (tx) => {
       const [cur] = await tx.select({ merchantId: payouts.merchantId }).from(payouts).where(eq(payouts.id, payoutId));
@@ -227,6 +218,7 @@ export async function applyPayoutResult(payoutId: string, r: PayoutResult): Prom
     });
   } catch (e) {
     if (!(e instanceof DuplicateEntry)) throw e;
+    console.error(`saque ${payoutId}: estorno já lançado no razão, resultado desfeito e ignorado`);
   }
 }
 
@@ -292,6 +284,10 @@ export async function pollProcessingPayouts(olderThanSec = 120): Promise<number>
     try {
       if (p.providerPayoutId) await applyPayoutResult(p.id, await provider.getPayout(p.providerPayoutId));
       else if (providerAccountId) await submit(provider, p, providerAccountId);
+      else {
+        console.error(`saque ${p.id}: lojista ${p.merchantId} sem conta no provedor, reenvio pulado`);
+        continue;
+      }
       if ((await byId(p.id)).status !== "processing") settled++;
     } catch (e) {
       console.error(`saque ${p.id}: consulta ao provedor falhou`, e);

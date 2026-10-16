@@ -93,11 +93,23 @@ it("insufficient balance returns insufficient_balance and writes nothing", async
   expect(await available(m)).toBe(0);
 });
 
+it("percentage fee_out is rounded and added to the fixed part", async () => {
+  const m = await richMerchant();
+  await d.update(merchants).set({ feeOutBps: 125, feeOutFixedCents: 100 }).where(eq(merchants.id, m));
+  // 9999 × 125 / 10000 = 124,9875 → 125; + 100 fixo = 225.
+  const { payout } = await createPayout(m, { ...BODY, amount: 9999 }, "chave-0001");
+  expect(payout.feeCents).toBe(225);
+  expect(await available(m)).toBe(14767 - 9999 - 225);
+});
+
 it("replay same key same body returns same payout", async () => {
   const m = await richMerchant();
+  const spy = vi.spyOn(simulator, "createPayout");
   const first = await createPayout(m, BODY, "chave-0001");
   // Mesma entrada com as chaves em outra ordem não é conflito.
   const again = await createPayout(m, { pix_key_type: "cpf", pix_key: "52998224725", amount: 10000 }, "chave-0001");
+  expect(spy).toHaveBeenCalledTimes(1); // replay não chama o provedor de novo
+  spy.mockRestore();
   expect(again.replayed).toBe(true);
   expect(again.payout.id).toBe(first.payout.id);
   expect(toPayoutJson(again.payout)).toEqual(toPayoutJson(first.payout));
@@ -207,6 +219,7 @@ it("accepts every key type", async () => {
   const ok = [
     { pix_key: "529.982.247-25", pix_key_type: "cpf", stored: "52998224725" },
     { pix_key: "11.222.333/0001-81", pix_key_type: "cnpj", stored: "11222333000181" },
+    { pix_key: "12.abc.345/01de-35", pix_key_type: "cnpj", stored: "12ABC34501DE35" }, // CNPJ alfanumérico
     { pix_key: "+5511987654321", pix_key_type: "phone", stored: "+5511987654321" },
     {
       pix_key: "123E4567-E89B-42D3-A456-426614174000",
@@ -224,11 +237,14 @@ it("accepts every key type", async () => {
   }
 });
 
-it("rejects when merchant not active", async () => {
+it("rejects when merchant not active, but replays what already exists", async () => {
   const m = await richMerchant();
+  const { payout } = await createPayout(m, BODY, "chave-0001");
   await d.update(merchants).set({ status: "suspended" }).where(eq(merchants.id, m));
-  await expect(createPayout(m, BODY, "chave-0001")).rejects.toMatchObject({ code: "merchant_inactive" });
-  expect(await d.$count(payouts)).toBe(0);
+  const again = await createPayout(m, BODY, "chave-0001");
+  expect(again).toMatchObject({ replayed: true, payout: { id: payout.id } });
+  await expect(createPayout(m, BODY, "chave-0002")).rejects.toMatchObject({ code: "merchant_inactive" });
+  expect(await d.$count(payouts)).toBe(1);
 });
 
 it("provider error leaves payout processing and the poll finishes it", async () => {
@@ -241,14 +257,48 @@ it("provider error leaves payout processing and the poll finishes it", async () 
     expect(payout.providerPayoutId).toBeNull();
     expect(await available(m)).toBe(4667);
 
+    // Status que não é completed/failed explícito: ignorado, sem estorno.
+    await applyPayoutResult(payout.id, { status: "estornado" as never });
+    expect((await payoutRow(payout.id)).status).toBe("processing");
+    expect(await reversals()).toBe(0);
+    expect(err).toHaveBeenCalledWith(expect.stringMatching(/status desconhecido/));
+
     expect(await pollProcessingPayouts(120)).toBe(0); // ainda novo demais
+    // Lojista sem conta no provedor: pula e avisa.
+    await d.update(merchants).set({ providerAccountId: null }).where(eq(merchants.id, m));
+    expect(await pollProcessingPayouts(0)).toBe(0);
+    expect(err).toHaveBeenCalledWith(expect.stringMatching(/sem conta no provedor/));
+    await d.update(merchants).set({ providerAccountId: "sim_acc_1" }).where(eq(merchants.id, m));
+
     expect(await pollProcessingPayouts(0)).toBe(1);
-    // Reenvio usa o id do saque como chave de idempotência no provedor.
+    // Envio e reenvio usam o id do saque como chave de idempotência no provedor.
+    expect(spy.mock.calls[0][0].idempotencyKey).toBe(payout.id);
     expect(spy.mock.calls[1][0].idempotencyKey).toBe(payout.id);
     const row = await payoutRow(payout.id);
     expect(row.status).toBe("completed");
     expect(row.providerPayoutId).toMatch(/^sim_po_/);
     expect(await pollProcessingPayouts(0)).toBe(0);
+  } finally {
+    spy.mockRestore();
+    err.mockRestore();
+  }
+});
+
+it("reversal already in the ledger rolls back the failed transition", async () => {
+  const m = await richMerchant();
+  const err = vi.spyOn(console, "error").mockImplementation(() => {});
+  const spy = vi.spyOn(simulator, "createPayout").mockRejectedValueOnce(new Error("ECONNRESET"));
+  try {
+    const { payout } = await createPayout(m, BODY, "chave-0001");
+    await d.transaction((tx) =>
+      postEntries(tx, [
+        { merchantId: m, amountCents: 10100, bucket: "available", kind: "cash_out_reversal", refType: "payout", refId: payout.id },
+      ]),
+    );
+    await applyPayoutResult(payout.id, { status: "failed", failureCode: "pix_key_not_found" });
+    expect((await payoutRow(payout.id)).status).toBe("processing"); // UPDATE desfeito junto
+    expect(await reversals()).toBe(1);
+    expect(err).toHaveBeenCalledWith(expect.stringMatching(/estorno já lançado/));
   } finally {
     spy.mockRestore();
     err.mockRestore();
