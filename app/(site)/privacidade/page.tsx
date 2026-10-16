@@ -77,7 +77,10 @@ export default function Privacidade() {
       <ul>
         <li>Senhas guardadas com hash Argon2, nunca em texto.</li>
         <li>CPF/CNPJ e segredo do 2FA criptografados no banco de dados.</li>
-        <li>Autenticação em dois fatores obrigatória para entrar e para sacar.</li>
+        <li>
+          2FA obrigatório no login e nos saques pelo painel; pela API, o saque exige chave com o escopo <code>payouts:write</code> e, se você
+          configurar, lista de IPs permitidos.
+        </li>
         <li>Chaves de API guardadas só como hash e com escopo limitado.</li>
         <li>Conexão sempre por HTTPS.</li>
       </ul>

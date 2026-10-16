@@ -12,7 +12,7 @@ import { CNPJ, FEE_IN, LEGAL_NAME, SITE_URL } from "./site";
 
 const title = "Vantri | Pix para vendas digitais";
 const OG_IMAGE = { url: "/opengraph-image", width: 1200, height: 630, alt: "Vantri: Pix para vendas digitais" };
-const description = `Cobrança Pix com QR Code, webhooks assinados e saque com 2FA para quem vende cursos, mentorias, e-books e SaaS. ${FEE_IN} por Pix recebido, sem mensalidade.`;
+const description = `Cobrança Pix com QR Code, webhooks assinados e 2FA no painel para quem vende cursos, mentorias, e-books e SaaS. ${FEE_IN} por Pix recebido, sem mensalidade.`;
 
 export const metadata: Metadata = {
   title,

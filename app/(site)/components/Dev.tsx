@@ -4,15 +4,15 @@ import type { ReactNode } from "react";
 import { SITE_URL } from "../site";
 import { Reveal, usePlay } from "./Reveal";
 
-// Evento charge.paid no formato do envelope de webhook ({ id, type, created_at, data })
-// com `data` no formato do serializer de Charge da API. brcode e qr_code_base64 encurtados.
+// Evento charge.paid real: envelope de webhook ({ id, type, created_at, data }) com `data` no
+// formato da Charge da API, sem qr_code_base64 (webhook não leva o QR). txid tem 25 base62. brcode encurtado.
 const EVENT = {
   id: "evt_4hT9qLx2VbN7cR1mZs8KdWfE",
   type: "charge.paid",
   created_at: "2026-10-16T14:02:11.000Z",
   data: {
     id: "6f1c2b8e-3d4a-4c5b-9e7f-1a2b3c4d5e6f",
-    txid: "Vt7Kq2Lm9Xp4Rs8Nw3Yz6Bc1Df5Gh0Jk",
+    txid: "Vt7Kq2Lm9Xp4Rs8Nw3Yz6Bc1D",
     external_ref: "pedido_1042",
     amount: 19700,
     fee: 294,
@@ -20,7 +20,6 @@ const EVENT = {
     description: "Curso de Fotografia (turma 3)",
     status: "paid",
     brcode: "00020101021226870014br.gov.bcb.pix…",
-    qr_code_base64: "iVBORw0KGgoAAAANSUhEUgAA…",
     expires_at: "2026-10-16T15:01:47.000Z",
     paid_at: "2026-10-16T14:02:10.000Z",
     payer: { name: "Ana Ribeiro", document_masked: "***.456.789-**" },
@@ -28,8 +27,9 @@ const EVENT = {
     created_at: "2026-10-16T14:01:47.000Z",
   },
 };
-// t = created_at em segundos Unix; v1 = HMAC-SHA256(segredo, `${t}.${corpo}`) em hex (encurtado).
-const SIGNATURE = "t=1792159331,v1=8c2f5a0e9b7d…3e41a6";
+// Assinatura real deste exemplo: t = created_at em segundos Unix, v1 = HMAC-SHA256 em hex com o segredo
+// de exemplo "whsec_exemplo" sobre `${t}.${JSON.stringify(EVENT)}`. Mudou o EVENT? Recalcule.
+const SIGNATURE = "t=1792159331,v1=c1eb8b186ce44f9ce22f8d4694a55e6429cf1b2012eb653e2a6bc2e37f7707bb";
 
 const REQUEST = [
   `curl -X POST ${SITE_URL}/api/v1/charges \\`,
@@ -124,7 +124,7 @@ function Webhook() {
           <span className="size-1.5 rounded-full bg-accent" aria-hidden />
           200 OK · tentativa 1 de 7
         </span>
-        <span className="font-mono">assinatura conferida</span>
+        <span className="font-mono">exemplo · segredo whsec_exemplo</span>
       </div>
     </div>
   );

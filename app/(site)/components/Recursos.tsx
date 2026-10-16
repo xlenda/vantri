@@ -173,7 +173,7 @@ const PILARES = [
   ["Conta própria por lojista", `Cada lojista tem a sua conta na ${PSP_NAME}. Nada de saldo de todos misturado numa conta só.`],
   ["Cadastro com análise", "Com CPF ou CNPJ, todo cadastro é analisado antes de liberar o acesso ao painel."],
   ["Limites claros", "Cobrança de R$ 1,00 a R$ 100.000,00. Saque de até R$ 50.000,00 por pedido."],
-  ["Sem apostas", "Bets e jogos de azar não são aceitos. Está nos termos e é checado no cadastro."],
+  ["Segredos só com hash", "Senhas e chaves de API ficam guardadas só como hash. A chave aparece uma única vez, na criação."],
 ];
 
 export function Recursos() {
@@ -200,8 +200,9 @@ export function Recursos() {
           <Card i={2} title="Webhooks assinados" visual={<Retries />}>
             Cada evento sai assinado com HMAC-SHA256 e timestamp. Se o seu servidor falhar, tentamos de novo em 1 min, 5 min, 30 min, 2 h, 6 h e 24 h.
           </Card>
-          <Card i={3} title="Saque só com 2FA" visual={<TwoFactor />}>
-            Login e saque pedem o código do app autenticador. Senha vazada, sozinha, não movimenta o seu dinheiro.
+          <Card i={3} title="Saque protegido" visual={<TwoFactor />}>
+            2FA obrigatório no login e nos saques pelo painel; pela API, o saque exige chave com o escopo payouts:write e, se você
+            configurar, lista de IPs permitidos. Senha vazada, sozinha, não movimenta o seu dinheiro.
           </Card>
           <Card i={4} title="Chaves de API com escopo" visual={<Scopes />}>
             Cada chave tem só as permissões de que precisa e pode ter lista de IPs permitidos. Revogue quando quiser.

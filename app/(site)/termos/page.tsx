@@ -40,8 +40,8 @@ export default function Termos() {
           Quando a conta é criada pela nossa equipe, você recebe uma senha temporária e precisa trocá-la no primeiro acesso.
         </li>
         <li>
-          Login, senha e o código do app autenticador (2FA) são pessoais. A autenticação em dois fatores é obrigatória para entrar no painel e para
-          cada saque.
+          Login, senha e o código do app autenticador (2FA) são pessoais. O 2FA é obrigatório no login e nos saques pelo painel; pela API, o
+          saque exige chave com o escopo <code>payouts:write</code> e, se você configurar, lista de IPs permitidos.
         </li>
       </ul>
 
@@ -82,8 +82,9 @@ export default function Termos() {
         </li>
         <li>Quando o pagamento é confirmado pela {PSP_NAME}, o valor líquido entra no seu saldo disponível.</li>
         <li>
-          Cada saque vai até R$ 50.000,00, é enviado para a chave Pix que você informar e exige o código 2FA. É preciso ter saldo para o valor
-          mais a tarifa.
+          Cada saque vai até R$ 50.000,00 e é enviado para a chave Pix que você informar. Pelo painel, exige o código 2FA; pela API, exige
+          chave com o escopo <code>payouts:write</code> e, se você configurar, lista de IPs permitidos. É preciso ter saldo para o valor mais a
+          tarifa.
         </li>
         <li>Se um saque falhar, o valor e a tarifa voltam para o seu saldo.</li>
         <li>Você é responsável por conferir a chave Pix de destino antes de confirmar o saque.</li>

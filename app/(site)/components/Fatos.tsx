@@ -13,7 +13,11 @@ export function Fatos() {
           <Counter prefix="R$ " to={0} label="de mensalidade e de taxa de setup" />
           <Counter prefix="D+" to={0} label="o valor líquido entra no saldo quando o Pix é confirmado" />
           <Counter to={7} label="tentativas de entrega para cada webhook" />
-          <Counter to={2} suffix="FA" label="obrigatório no login e em todo saque" />
+          {/* "2FA" não é número: fica estático, sem contagem. */}
+          <div>
+            <p className="text-4xl font-bold tracking-tight sm:text-5xl">2FA</p>
+            <p className="mt-2 max-w-[22ch] text-sm leading-snug text-muted">obrigatório no login e nos saques pelo painel</p>
+          </div>
         </Reveal>
       </div>
     </section>
