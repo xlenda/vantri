@@ -65,7 +65,11 @@ async function post(
     refType: "med_case" as const,
     refId: c.id,
   }));
-  if (!(await postEntries(tx, entries))) throw DUPLICATE;
+  if (!(await postEntries(tx, entries))) {
+    // Não deveria acontecer (caso novo / transição guardada): razão divergente, merece investigação.
+    console.error(`[med] ${kind} já lançado em parte para o caso ${c.id}; transação desfeita`);
+    throw DUPLICATE;
+  }
 }
 
 /** Abre o caso e bloqueia o valor. O disponível pode ficar negativo (lojista já sacou): não limita. */
@@ -166,6 +170,8 @@ export async function submitDefense(
   if (defense.length < 20 || defense.length > 5000) {
     throw new MedError("invalid_request", "A defesa precisa ter entre 20 e 5000 caracteres.");
   }
+  // Postgres recusa NUL em text: viraria erro 500.
+  if (defense.includes("\u0000")) throw new MedError("invalid_request", "A defesa contém caracteres inválidos.");
   if (!Array.isArray(files) || files.length > MAX_FILES) {
     throw new MedError("invalid_file", `Envie no máximo ${MAX_FILES} arquivos.`);
   }
@@ -205,7 +211,8 @@ export async function listMedCases(
   merchantId: string | null,
   opts: { status?: MedStatus; limit?: number; cursor?: string } = {},
 ): Promise<MedCaseRow[]> {
-  const { status, limit = 50, cursor } = opts;
+  const { status, cursor } = opts;
+  const limit = Number.isInteger(opts.limit) ? Math.min(Math.max(1, opts.limit!), 100) : 50;
   if (cursor !== undefined && !UUID.test(cursor)) throw new MedError("invalid_request", "Cursor inválido.");
   return db()
     .select()
@@ -220,7 +227,7 @@ export async function listMedCases(
       ),
     )
     .orderBy(desc(medCases.createdAt), desc(medCases.id))
-    .limit(Math.min(Math.max(1, limit), 100));
+    .limit(limit);
 }
 
 /** Caso de outro lojista (ou id inválido) → null. `merchantId` null = admin. */
@@ -233,17 +240,46 @@ export async function getMedCase(merchantId: string | null, id: string): Promise
   return c ?? null;
 }
 
+type Viewer = { role: "admin" | "merchant"; merchantId?: string };
+
+/** Filtro de dono dos anexos: admin vê tudo (undefined); lojista só os próprios; sem merchantId → nega (null). */
+function ownerFilter(viewer: Viewer) {
+  if (viewer.role === "admin") return undefined;
+  return viewer.merchantId ? eq(medCases.merchantId, viewer.merchantId) : null;
+}
+
 /** Anexo da defesa. Lojista só vê arquivo dos próprios casos; admin vê todos. */
 export async function getMedFile(
   fileId: string,
-  viewer: { role: "admin" | "merchant"; merchantId?: string },
+  viewer: Viewer,
 ): Promise<{ filename: string; mime: string; data: Uint8Array } | null> {
-  const isAdmin = viewer.role === "admin";
-  if (!UUID.test(fileId) || (!isAdmin && !viewer.merchantId)) return null;
+  const owner = ownerFilter(viewer);
+  if (!UUID.test(fileId) || owner === null) return null;
   const [f] = await db()
     .select({ filename: medFiles.filename, mime: medFiles.mime, data: medFiles.data })
     .from(medFiles)
     .innerJoin(medCases, eq(medFiles.medCaseId, medCases.id))
-    .where(and(eq(medFiles.id, fileId), isAdmin ? undefined : eq(medCases.merchantId, viewer.merchantId!)));
+    .where(and(eq(medFiles.id, fileId), owner));
   return f ?? null;
+}
+
+/** Anexos de um caso, sem os bytes. Mesma regra de dono de `getMedFile`. */
+export async function listMedFiles(
+  caseId: string,
+  viewer: Viewer,
+): Promise<Array<{ id: string; filename: string; mime: string; sizeBytes: number; createdAt: Date }>> {
+  const owner = ownerFilter(viewer);
+  if (!UUID.test(caseId) || owner === null) return [];
+  return db()
+    .select({
+      id: medFiles.id,
+      filename: medFiles.filename,
+      mime: medFiles.mime,
+      sizeBytes: medFiles.sizeBytes,
+      createdAt: medFiles.createdAt,
+    })
+    .from(medFiles)
+    .innerJoin(medCases, eq(medFiles.medCaseId, medCases.id))
+    .where(and(eq(medFiles.medCaseId, caseId), owner))
+    .orderBy(medFiles.createdAt, medFiles.filename, medFiles.id); // mesma defesa = mesmo created_at
 }

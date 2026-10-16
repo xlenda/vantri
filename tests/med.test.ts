@@ -1,5 +1,5 @@
 import { eq } from "drizzle-orm";
-import { beforeEach, expect, it } from "vitest";
+import { beforeEach, expect, it, vi } from "vitest";
 import { type Db, setDb } from "@/lib/db/client";
 import { charges, ledgerEntries, medCases, medFiles, webhookDeliveries, webhookEndpoints } from "@/lib/db/schema";
 import { getBalance, postEntries } from "@/lib/money/ledger";
@@ -10,6 +10,7 @@ import {
   getMedCase,
   getMedFile,
   listMedCases,
+  listMedFiles,
   MedError,
   submitDefense,
   toMedCaseJson,
@@ -73,6 +74,10 @@ async function openMed(amount = 5000, n = 1) {
 const caseRow = async (id: string) => (await d.select().from(medCases).where(eq(medCases.id, id)))[0];
 const deliveries = async (type: string) =>
   (await d.select().from(webhookDeliveries)).filter((w) => w.eventType === type);
+const closedPayload = async () => {
+  const [w] = await deliveries("med.closed");
+  return (w.payload as { data: Record<string, unknown> }).data;
+};
 
 async function medError(p: Promise<unknown>): Promise<string> {
   const err = await p.then(
@@ -118,6 +123,8 @@ it("merchant_won releases", async () => {
   const c = await caseRow(caseId);
   expect(c.status).toBe("merchant_won");
   expect(c.closedAt).toBeInstanceOf(Date);
+  const closedAt = c.closedAt!.toISOString();
+  expect(await closedPayload()).toMatchObject({ id: caseId, status: "merchant_won", closed_at: closedAt });
   // Repetido ou tardio (outro desfecho): ignorado, sem lançamento nem evento.
   expect(await applyMedClosed(close)).toBe("duplicate");
   expect(await applyMedClosed({ ...close, outcome: "payer_refunded" })).toBe("duplicate");
@@ -133,7 +140,9 @@ it("payer_refunded debits blocked", async () => {
   const refund = { type: "med.closed", providerCaseId: e.providerCaseId, outcome: "payer_refunded" } as const;
   expect(await applyMedClosed(refund)).toBe("closed");
   expect(await getBalance(merchantId)).toEqual({ available: 9767, blocked: 0, total: 9767 });
-  expect((await caseRow(caseId)).status).toBe("payer_refunded");
+  const c = await caseRow(caseId);
+  expect(c.status).toBe("payer_refunded");
+  expect(await closedPayload()).toMatchObject({ status: "payer_refunded", closed_at: c.closedAt!.toISOString() });
   expect(
     await applyMedClosed({ type: "med.closed", providerCaseId: e.providerCaseId, outcome: "merchant_won" }),
   ).toBe("duplicate");
@@ -153,6 +162,7 @@ it("closed rolls back everything when the ledger already has part of the batch",
       { merchantId, amountCents: 5000, bucket: "available", kind: "med_release", refType: "med_case", refId: caseId },
     ]),
   );
+  const log = vi.spyOn(console, "error").mockImplementation(() => {});
   expect(await applyMedClosed({ type: "med.closed", providerCaseId: e.providerCaseId, outcome: "merchant_won" })).toBe(
     "duplicate",
   );
@@ -160,6 +170,9 @@ it("closed rolls back everything when the ledger already has part of the batch",
   const blocked = await d.select().from(ledgerEntries).where(eq(ledgerEntries.kind, "med_release"));
   expect(blocked.map((r) => r.bucket)).toEqual(["available"]);
   expect(await deliveries("med.closed")).toHaveLength(0);
+  expect(log).toHaveBeenCalledTimes(1);
+  expect(String(log.mock.calls[0][0])).toContain(caseId);
+  log.mockRestore();
 });
 
 it("defense stores files with detected mime and sanitized name, status defended", async () => {
@@ -169,16 +182,19 @@ it("defense stores files with detected mime and sanitized name, status defended"
     { name: "foto.pdf", bytes: PNG },
     { name: "C:\\Users\\a\\nota.JPEG", bytes: JPEG },
     { name: `${"a".repeat(300)}.pdf`, bytes: PDF },
+    // U+202E (RTL override) mostraria "fatura" + "exe.pdf" invertido; 4 bytes "%PDF" exatos bastam.
+    { name: "fatura\u202Efdp.exe", bytes: PDF.slice(0, 4) },
   ]);
   const c = await caseRow(caseId);
   expect(c.status).toBe("defended");
   expect(c.defenseText).toBe(TEXT);
   const files = await d.select().from(medFiles).where(eq(medFiles.medCaseId, caseId));
   const byName = Object.fromEntries(files.map((f) => [f.filename, f]));
-  const names = ["a".repeat(116) + ".pdf", "comprovante.pdf", "foto.pdf.png", "nota.JPEG"];
+  const names = ["a".repeat(116) + ".pdf", "comprovante.pdf", "faturafdp.exe.pdf", "foto.pdf.png", "nota.JPEG"];
   expect(Object.keys(byName).sort()).toEqual(names);
   expect(byName["foto.pdf.png"].mime).toBe("image/png");
   expect(byName["nota.JPEG"].mime).toBe("image/jpeg");
+  expect(byName["faturafdp.exe.pdf"]).toMatchObject({ mime: "application/pdf", sizeBytes: 4 });
   expect(byName["comprovante.pdf"]).toMatchObject({ mime: "application/pdf", sizeBytes: PDF.length });
   expect([...byName["comprovante.pdf"].data]).toEqual([...PDF]);
 });
@@ -205,6 +221,7 @@ it("defense rejects bad text and bad file sets", async () => {
   const pdf = (name: string) => ({ name, bytes: PDF });
   expect(await medError(submitDefense(merchantId, caseId, `   ${"x".repeat(19)}   `, []))).toBe("invalid_request");
   expect(await medError(submitDefense(merchantId, caseId, "x".repeat(5001), []))).toBe("invalid_request");
+  expect(await medError(submitDefense(merchantId, caseId, `${TEXT}\u0000fim`, []))).toBe("invalid_request");
   expect(await medError(submitDefense(merchantId, caseId, TEXT, [1, 2, 3, 4, 5, 6].map((i) => pdf(`${i}.pdf`))))).toBe(
     "invalid_file",
   );
@@ -212,6 +229,10 @@ it("defense rejects bad text and bad file sets", async () => {
   expect(await medError(submitDefense(merchantId, caseId, TEXT, [{ name: "v.pdf", bytes: new Uint8Array() }]))).toBe(
     "invalid_file",
   );
+  for (const short of [[0x25, 0x50, 0x44], [0xff, 0xd8]]) {
+    const files = [{ name: "curto.pdf", bytes: new Uint8Array(short) }];
+    expect(await medError(submitDefense(merchantId, caseId, TEXT, files))).toBe("invalid_file");
+  }
   expect((await caseRow(caseId)).status).toBe("open");
   // Limites exatos passam: 5000 caracteres, 5 arquivos, 5 MB.
   const five = [edge, PDF, PDF, PDF, PDF].map((bytes) => ({ name: "a.pdf", bytes }));
@@ -257,6 +278,28 @@ it("other merchant cannot read file", async () => {
   expect(await getMedFile(id, { role: "admin" })).toMatchObject({ filename: "prova.pdf" });
 });
 
+it("listMedFiles respects the owner and never returns bytes", async () => {
+  const { merchantId, caseId } = await openMed(5000, 1);
+  const other = await newMerchant(d, 2);
+  await submitDefense(merchantId, caseId, TEXT, [
+    { name: "prova.pdf", bytes: PDF },
+    { name: "foto.png", bytes: PNG },
+  ]);
+  expect(await listMedFiles(caseId, { role: "merchant", merchantId: other })).toEqual([]);
+  expect(await listMedFiles(caseId, { role: "merchant" })).toEqual([]);
+  expect(await listMedFiles("nao-e-uuid", { role: "admin" })).toEqual([]);
+  const own = await listMedFiles(caseId, { role: "merchant", merchantId });
+  expect(own.map((f) => [f.filename, f.mime, f.sizeBytes])).toEqual([
+    ["foto.png", "image/png", PNG.length],
+    ["prova.pdf", "application/pdf", PDF.length],
+  ]);
+  for (const f of own) {
+    expect(Object.keys(f).sort()).toEqual(["createdAt", "filename", "id", "mime", "sizeBytes"]);
+    expect(await getMedFile(f.id, { role: "merchant", merchantId })).not.toBeNull();
+  }
+  expect(await listMedFiles(caseId, { role: "admin" })).toHaveLength(2);
+});
+
 it("list and get respect the merchant; admin sees all; json has exact fields", async () => {
   const a = await openMed(1000, 1);
   const b = await openMed(2000, 2);
@@ -268,6 +311,9 @@ it("list and get respect the merchant; admin sees all; json has exact fields", a
   expect((await listMedCases(null)).map((c) => c.amountCents)).toEqual([3000, 2000, 1000]);
   expect((await listMedCases(null, { status: "open", limit: 1 })).map((c) => c.amountCents)).toEqual([3000]);
   expect(await listMedCases(null, { status: "defended" })).toEqual([]);
+  // limit não inteiro cai no padrão (50); fora da faixa é limitado a 1–100.
+  for (const limit of [Number.NaN, 1.5, Infinity]) expect(await listMedCases(null, { limit })).toHaveLength(3);
+  expect(await listMedCases(null, { limit: 0 })).toHaveLength(1);
   const page2 = await listMedCases(a.merchantId, { limit: 1, cursor: mine[0].id });
   expect(page2.map((c) => c.amountCents)).toEqual([1000]);
 
