@@ -5,7 +5,7 @@ import { decrypt } from "@/lib/crypto";
 import { type Db, setDb } from "@/lib/db/client";
 import { webhookDeliveries, webhookEndpoints } from "@/lib/db/schema";
 import { createEndpoint, emit, resendDelivery, type WebhookEventType } from "@/lib/services/events";
-import { dispatchDue, RETRY_DELAYS_SEC } from "@/lib/webhooks/dispatch";
+import { dispatchDue, RETRY_DELAYS_SEC, type Resolve } from "@/lib/webhooks/dispatch";
 import { signPayload, verifySignature } from "@/lib/webhooks/sign";
 import { createTestDb } from "./helpers/db";
 import { newMerchant } from "./helpers/factories";
@@ -21,8 +21,7 @@ beforeEach(async () => {
   setDb(d);
 });
 
-// No futuro: entregas criadas agora (next_attempt_at = now() do banco) já estão vencidas em T0.
-const T0 = new Date("2030-01-01T00:00:00.000Z");
+const T0 = new Date("2026-10-16T12:00:00.000Z");
 const sec = (date: Date) => Math.floor(date.getTime() / 1000);
 
 type Sent = { url: string; init: RequestInit };
@@ -31,16 +30,23 @@ function stub(...responses: Array<number | Error>) {
   const send = (async (url: string, init: RequestInit) => {
     calls.push({ url, init });
     const r = responses[Math.min(calls.length - 1, responses.length - 1)];
-    if (r instanceof Error) throw r;
+    if (typeof r !== "number") throw r;
     return new Response(r === 204 ? null : "ok", { status: r });
   }) as typeof fetch;
   return { send, calls };
 }
 
+// DNS falso: os testes nunca saem para a rede.
+const publicDns: Resolve = async () => [{ address: "93.184.216.34" }];
+// Formato real do undici: TypeError("fetch failed") com o erro do socket em cause.
+const netError = (code: string, message: string) =>
+  Object.assign(new TypeError("fetch failed"), { cause: Object.assign(new Error(message), { code }) });
+
 async function setup(events: WebhookEventType[] = ["charge.paid"]) {
   const merchantId = await newMerchant(d, 1);
   const ep = await createEndpoint(merchantId, { url: "https://loja.example.com/hooks/vantri", events });
   await d.transaction((tx) => emit(tx, merchantId, "charge.paid", { id: "ch_1", amount: 14990 }));
+  await d.update(webhookDeliveries).set({ nextAttemptAt: T0 });
   const [delivery] = await d.select().from(webhookDeliveries);
   return { merchantId, ep, delivery };
 }
@@ -101,32 +107,35 @@ it("emit only enqueues for active endpoints subscribed to the type", async () =>
 it("retry schedule: after 1st failure next_attempt_at = now+60s; after 7th failure status=failed", async () => {
   expect(RETRY_DELAYS_SEC).toEqual([60, 300, 1800, 7200, 21600, 86400]);
   const { delivery } = await setup();
-  // 302 (redirect não é seguido), erro de rede e 500 — tudo é falha.
-  const { send, calls } = stub(302, new Error("connect ECONNREFUSED"), 500);
+  // 302 (redirect não é seguido), conexão recusada e 500 — tudo é falha.
+  const { send, calls } = stub(302, netError("ECONNREFUSED", "connect ECONNREFUSED 10.0.0.9:443"), 500);
 
   let now = T0;
-  expect(await dispatchDue(50, now, send)).toEqual({ delivered: 0, failed: 1 });
+  expect(await dispatchDue(50, now, send, publicDns)).toEqual({ delivered: 0, failed: 1 });
   let r = await row(delivery.id);
-  expect(r).toMatchObject({ status: "pending", attempts: 1, lastStatusCode: 302 });
+  expect(r).toMatchObject({ status: "pending", attempts: 1, lastStatusCode: 302, lastError: "resposta HTTP 302" });
   expect(r.nextAttemptAt.getTime()).toBe(now.getTime() + 60_000);
 
   // Antes da hora, nada é enviado.
-  expect(await dispatchDue(50, new Date(now.getTime() + 59_000), send)).toEqual({ delivered: 0, failed: 0 });
+  const early = new Date(now.getTime() + 59_000);
+  expect(await dispatchDue(50, early, send, publicDns)).toEqual({ delivered: 0, failed: 0 });
   expect(calls).toHaveLength(1);
 
   for (let n = 2; n <= 7; n++) {
     now = r.nextAttemptAt;
-    expect(await dispatchDue(50, now, send)).toEqual({ delivered: 0, failed: 1 });
+    expect(await dispatchDue(50, now, send, publicDns)).toEqual({ delivered: 0, failed: 1 });
     r = await row(delivery.id);
     expect(r.attempts).toBe(n);
-    if (n === 2) expect(r).toMatchObject({ lastStatusCode: null, lastError: expect.stringContaining("ECONNREFUSED") });
+    if (n === 2) expect(r).toMatchObject({ lastStatusCode: null, lastError: "conexão recusada" });
     if (n < 7) {
       expect(r.status).toBe("pending");
       expect(r.nextAttemptAt.getTime()).toBe(now.getTime() + RETRY_DELAYS_SEC[n - 1] * 1000);
     }
   }
-  expect(r).toMatchObject({ status: "failed", attempts: 7, lastStatusCode: 500, deliveredAt: null });
-  expect(await dispatchDue(50, new Date(now.getTime() + 10 * 86_400_000), send)).toEqual({ delivered: 0, failed: 0 });
+  expect(r).toMatchObject({ status: "failed", attempts: 7, lastStatusCode: 500, lastError: "resposta HTTP 500" });
+  expect(r.deliveredAt).toBeNull();
+  const later = new Date(now.getTime() + 10 * 86_400_000);
+  expect(await dispatchDue(50, later, send, publicDns)).toEqual({ delivered: 0, failed: 0 });
   expect(calls).toHaveLength(7);
 });
 
@@ -135,7 +144,7 @@ it("2xx marks delivered", async () => {
   const { send, calls } = stub(204);
 
   // Duas rodadas ao mesmo tempo: a entrega é reivindicada por uma só.
-  const results = await Promise.all([dispatchDue(50, T0, send), dispatchDue(50, T0, send)]);
+  const results = await Promise.all([dispatchDue(50, T0, send, publicDns), dispatchDue(50, T0, send, publicDns)]);
   expect(results.reduce((a, x) => a + x.delivered, 0)).toBe(1);
   expect(calls).toHaveLength(1);
 
@@ -153,6 +162,58 @@ it("2xx marks delivered", async () => {
   const body = init.body as string;
   expect(JSON.parse(body)).toEqual(r.payload);
   expect(verifySignature(ep.secret, body, headers.get("x-vantri-signature")!, sec(T0))).toBe(true);
+});
+
+it("host that resolves to an internal IP is never sent to", async () => {
+  const { delivery } = await setup();
+  const { send, calls } = stub(200);
+  const seen: string[] = [];
+  const enotfound = Object.assign(new Error("getaddrinfo ENOTFOUND loja.example.com"), { code: "ENOTFOUND" });
+  const cases: Array<[Resolve, string]> = [
+    [
+      async (host) => {
+        seen.push(host);
+        return [{ address: "93.184.216.34" }, { address: "127.0.0.1" }]; // basta um IP interno
+      },
+      "endereço bloqueado",
+    ],
+    [async () => [{ address: "fe80::1%eth0" }], "endereço bloqueado"],
+    [async () => [{ address: "::ffff:169.254.169.254" }], "endereço bloqueado"],
+    [async () => [], "falha de DNS"],
+    [async () => Promise.reject(enotfound), "falha de DNS"],
+  ];
+  let now = T0;
+  for (const [resolve, expected] of cases) {
+    expect(await dispatchDue(50, now, send, resolve)).toEqual({ delivered: 0, failed: 1 });
+    const r = await row(delivery.id);
+    expect(r).toMatchObject({ status: "pending", lastStatusCode: null, lastError: expected });
+    now = r.nextAttemptAt;
+  }
+  expect(seen).toEqual(["loja.example.com"]);
+
+  // URL que as regras atuais recusam (gravada antes delas, ou direto no banco) também é barrada no envio.
+  await d.update(webhookEndpoints).set({ url: "https://intranet/h" });
+  expect(await dispatchDue(50, now, send, publicDns)).toEqual({ delivered: 0, failed: 1 });
+  expect(await row(delivery.id)).toMatchObject({ attempts: 6, lastError: "endereço bloqueado" });
+  expect(calls).toHaveLength(0);
+});
+
+it("last_error keeps only a generic category, never the raw cause", async () => {
+  const { delivery } = await setup();
+  const cases: Array<[Error, string]> = [
+    [new DOMException("The operation was aborted due to timeout", "TimeoutError"), "tempo esgotado"],
+    [netError("UND_ERR_CONNECT_TIMEOUT", "Connect Timeout Error (attempted address: 10.0.0.9:443)"), "tempo esgotado"],
+    [netError("ECONNREFUSED", "connect ECONNREFUSED 10.0.0.9:443"), "conexão recusada"],
+    [netError("ERR_TLS_CERT_ALTNAME_INVALID", "IP: 10.0.0.9 is not in the cert's list: 192.168.1.1"), "erro de TLS"],
+    [netError("ECONNRESET", "read ECONNRESET 10.0.0.9:443"), "erro de rede"],
+  ];
+  let now = T0;
+  for (const [err, expected] of cases) {
+    expect(await dispatchDue(50, now, stub(err).send, publicDns)).toEqual({ delivered: 0, failed: 1 });
+    const r = await row(delivery.id);
+    expect(r.lastError).toBe(expected);
+    now = r.nextAttemptAt;
+  }
 });
 
 it("rejects http:// and https://127.0.0.1 and https://10.0.0.5 endpoint", async () => {
@@ -186,6 +247,21 @@ it("rejects http:// and https://127.0.0.1 and https://10.0.0.5 endpoint", async 
     "https://[::ffff:10.0.0.1]/h",
     "https://[::ffff:127.0.0.1]/h",
     `https://loja.example.com/${"a".repeat(2048)}`,
+    "https://usuario:senha@loja.example.com/h",
+    "https://usuario@loja.example.com/h",
+    "https://intranet/h", // um rótulo só
+    "https://nas.localdomain/h",
+    "https://198.18.0.1/h",
+    "https://198.19.255.255/h",
+    "https://224.0.0.1/h",
+    "https://240.0.0.1/h",
+    "https://255.255.255.255/h",
+    "https://[::a00:1]/h", // IPv4-compatível
+    "https://[::ffff:0:a00:1]/h", // IPv4-traduzido
+    "https://[::ffff:8.8.8.8]/h", // IPv4-mapeado, mesmo público
+    "https://[64:ff9b::a00:1]/h", // NAT64
+    "https://[2002:a00:1::1]/h", // 6to4
+    "https://[fec0::1]/h",
   ]) {
     await expect(create(url), url).rejects.toMatchObject({ code: "invalid_request" });
   }
@@ -195,12 +271,13 @@ it("rejects http:// and https://127.0.0.1 and https://10.0.0.5 endpoint", async 
   });
   expect(await d.$count(webhookEndpoints)).toBe(0);
 
-  // Públicos passam (172.32.x está fora de 172.16/12; 100.128.x fora de 100.64/10).
+  // Públicos passam (172.32.x fora de 172.16/12; 100.128.x fora de 100.64/10; 198.20.x fora de 198.18/15).
   for (const url of [
     "https://loja.example.com/h",
     "https://8.8.8.8/h",
     "https://172.32.0.1/h",
     "https://100.128.0.1/h",
+    "https://198.20.0.1/h",
     "https://[2606:4700::1111]/h",
   ]) {
     await expect(create(url), url).resolves.toBeTruthy();
@@ -236,6 +313,6 @@ it("resend of other merchant's delivery is not found", async () => {
 
   // Uma tentativa a mais: 2xx entrega.
   const { send } = stub(200);
-  expect(await dispatchDue(50, new Date(), send)).toEqual({ delivered: 1, failed: 0 });
+  expect(await dispatchDue(50, new Date(), send, publicDns)).toEqual({ delivered: 1, failed: 0 });
   expect(await row(delivery.id)).toMatchObject({ status: "delivered", attempts: 8 });
 });
