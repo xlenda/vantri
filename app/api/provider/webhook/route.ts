@@ -1,4 +1,5 @@
 import { after } from "next/server";
+import { logError } from "@/lib/log";
 import { getProvider } from "@/lib/provider";
 import { WebhookAuthError } from "@/lib/provider/simulator";
 import type { ProviderEvent } from "@/lib/provider/types";
@@ -13,19 +14,18 @@ export const runtime = "nodejs";
 const error = (status: number, code: string, message: string) =>
   Response.json({ error: { code, message } }, { status });
 
+// Só ids do provedor no log, nunca dados do pagador.
+const ignored = (what: string) => console.log(`webhook do provedor: ${what} desconhecido, ignorado`);
+
 async function apply(e: ProviderEvent): Promise<void> {
   switch (e.type) {
     case "charge.paid":
-      // Sem dados do pagador no log.
-      if ((await applyChargePaid(e)) === "unknown") console.log(`webhook do provedor: cobrança ${e.providerChargeId} desconhecida, ignorada`);
+      if ((await applyChargePaid(e)) === "unknown") ignored(`cobrança ${e.providerChargeId}`);
       return;
     case "payout.completed":
     case "payout.failed": {
       const id = await findPayoutIdByProviderId(e.providerPayoutId);
-      if (!id) {
-        console.log(`webhook do provedor: saque ${e.providerPayoutId} desconhecido, ignorado`);
-        return;
-      }
+      if (!id) return ignored(`saque ${e.providerPayoutId}`);
       await applyPayoutResult(
         id,
         e.type === "payout.completed"
@@ -35,11 +35,16 @@ async function apply(e: ProviderEvent): Promise<void> {
       return;
     }
     case "med.opened":
-      await applyMedOpened(e);
+      if ((await applyMedOpened(e)) === "unknown") ignored(`MED ${e.providerCaseId} da cobrança ${e.providerChargeId}`);
       return;
     case "med.closed":
-      await applyMedClosed(e);
+      if ((await applyMedClosed(e)) === "unknown") ignored(`MED ${e.providerCaseId}`);
       return;
+    default: {
+      // Evento novo no ProviderEvent sem tratamento aqui não compila.
+      const _exhaustive: never = e;
+      throw new Error(`evento do provedor sem tratamento: ${(_exhaustive as { type: string }).type}`);
+    }
   }
 }
 
@@ -55,10 +60,11 @@ export async function POST(req: Request): Promise<Response> {
   }
 
   // Em ordem; os handlers são idempotentes, então o reenvio do lote inteiro depois de um 500 é seguro.
+  let current: ProviderEvent | undefined;
   try {
-    for (const e of events) await apply(e);
+    for (current of events) await apply(current);
   } catch (e) {
-    console.error("webhook do provedor: falha ao aplicar evento", e);
+    logError("webhook do provedor: falha ao aplicar evento", e, current && { type: current.type });
     return error(500, "internal_error", "Falha ao processar o evento. Tente novamente.");
   }
 

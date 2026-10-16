@@ -38,14 +38,11 @@ async function activeMerchant(n = 1) {
   return id;
 }
 
-function post(events: unknown[], secret = "segredo-sim", body = JSON.stringify({ events })) {
-  return webhook(
-    new Request("http://localhost/api/provider/webhook", {
-      method: "POST",
-      headers: { "content-type": "application/json", "x-simulator-secret": secret },
-      body,
-    }),
-  );
+/** secret null = sem o cabeçalho. */
+function post(events: unknown[], secret: string | null = "segredo-sim", body = JSON.stringify({ events })) {
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  if (secret !== null) headers["x-simulator-secret"] = secret;
+  return webhook(new Request("http://localhost/api/provider/webhook", { method: "POST", headers, body }));
 }
 
 const get = (auth?: string) =>
@@ -63,6 +60,14 @@ it("webhook with wrong simulator secret → 401", async () => {
   }
   expect(await cashIns()).toBe(0);
   expect(afterTasks).toHaveLength(0);
+});
+
+it("secret is checked before the body: bad body + wrong/missing secret → 401", async () => {
+  for (const secret of ["errado", null]) {
+    const res = await post([], secret, "{");
+    expect(res.status).toBe(401);
+    expect((await res.json()).error.code).toBe("unauthorized");
+  }
 });
 
 it("malformed body with the right secret → 400", async () => {
@@ -105,6 +110,38 @@ it("unknown charge and unknown payout are ignored with 200", async () => {
   expect(log.mock.calls.join(" ")).not.toContain("Pagador Simulado");
   expect(log.mock.calls.join(" ")).not.toContain("52998224725");
   log.mockRestore();
+});
+
+it("unknown MED (opened and closed) → one log line each, provider ids only", async () => {
+  const log = vi.spyOn(console, "log").mockImplementation(() => {});
+  const opened = { ...simulator.simulateMed("sim_ch_nao_existe", 5000), reason: "motivo-sigiloso" };
+  const res = await post([opened, { type: "med.closed", providerCaseId: "sim_med_nao_existe", outcome: "payer_refunded" }]);
+  expect(res.status).toBe(200);
+  expect(log.mock.calls).toEqual([
+    [`webhook do provedor: MED ${opened.providerCaseId} da cobrança sim_ch_nao_existe desconhecido, ignorado`],
+    ["webhook do provedor: MED sim_med_nao_existe desconhecido, ignorado"],
+  ]);
+  log.mockRestore();
+});
+
+it("failed query with payer data → log has no payer data nor query params", async () => {
+  const m = await activeMerchant();
+  const { charge } = await createCharge(m, { external_ref: "p1", amount: 14990 });
+  // O UPDATE de applyChargePaid leva nome e documento do pagador nos params; o trigger faz ele falhar.
+  await d.execute(sql`create function boom() returns trigger language plpgsql as $$ begin raise exception 'falha forçada'; end $$`);
+  await d.execute(sql`create trigger boom before update on charges for each row execute function boom()`);
+  const err = vi.spyOn(console, "error").mockImplementation(() => {});
+  const paid = { ...simulator.simulatePaid(charge.providerChargeId), payerName: "Fulana Secreta", payerDocument: "52998224725" };
+
+  const res = await post([paid]);
+  expect(res.status).toBe(500);
+  const out = err.mock.calls.flat().map(String).join("\n");
+  expect(out).toContain("P0001"); // código do Postgres para RAISE EXCEPTION
+  expect(out).toContain("falha forçada");
+  for (const leak of ["Fulana", "52998224725", "529.982", "params", "Failed query", "update \"charges\""]) {
+    expect(out).not.toContain(leak);
+  }
+  err.mockRestore();
 });
 
 it("payout.failed after completed ignored", async () => {

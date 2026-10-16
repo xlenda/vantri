@@ -1,3 +1,5 @@
+import { logError } from "@/lib/log";
+
 let warned = false;
 
 /** Cloudflare Turnstile. Sem TURNSTILE_SECRET_KEY a verificação fica desligada (aviso uma vez). */
@@ -21,7 +23,7 @@ export async function verifyTurnstile(token: string | undefined, ip: string): Pr
     return ((await res.json()) as { success?: unknown }).success === true;
   } catch (e) {
     // Falha de rede/timeout: nega (fechado por padrão).
-    console.error("Falha ao verificar Turnstile", e);
+    logError("Falha ao verificar Turnstile", e);
     return false;
   }
 }

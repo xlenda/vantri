@@ -3,6 +3,7 @@ import { and, arrayContains, asc, eq, inArray, lte } from "drizzle-orm";
 import { decrypt, randomBase62 } from "@/lib/crypto";
 import { db, type Tx } from "@/lib/db/client";
 import { webhookDeliveries, webhookEndpoints } from "@/lib/db/schema";
+import { logError } from "@/lib/log";
 import type { WebhookEventType } from "@/lib/services/events";
 import { signPayload } from "./sign";
 import { isBlockedAddress, webhookHost, webhookUrlProblem } from "./ssrf";
@@ -151,7 +152,7 @@ export async function dispatchDue(
   for (const [i, r] of results.entries()) {
     if (r.status === "fulfilled") delivered += Number(r.value);
     // Sem gravar, a entrega volta quando o lease vencer (pode reenviar: entrega é "pelo menos uma vez").
-    else console.error(`webhook: falha ao gravar resultado da entrega ${claimed[i].id}`, r.reason);
+    else logError("webhook: falha ao gravar resultado da entrega", r.reason, { delivery: claimed[i].id });
   }
   return { delivered, failed: results.length - delivered };
 }

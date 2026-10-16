@@ -4,6 +4,7 @@ import { isValidCnpj, isValidCpf, normalizeDocument } from "@/lib/br/documents";
 import { sha256Hex } from "@/lib/crypto";
 import { db, type Tx } from "@/lib/db/client";
 import { merchants, payouts } from "@/lib/db/schema";
+import { logError } from "@/lib/log";
 import { computeFee } from "@/lib/money/fees";
 import { getBalance, type LedgerEntry, lockMerchant, postEntries } from "@/lib/money/ledger";
 import { getProvider } from "@/lib/provider";
@@ -175,7 +176,7 @@ export async function createPayout(
     await submit(provider, res.payout, res.providerAccountId);
   } catch (e) {
     // Rede/erro desconhecido: o dinheiro já está debitado e o saque fica processing; o cron reconsulta.
-    console.error(`saque ${res.payout.id}: provedor falhou, fica em processamento`, e);
+    logError("saque: provedor falhou, fica em processamento", e, { payout: res.payout.id });
   }
   return { payout: await byId(res.payout.id), replayed: false };
 }
@@ -290,7 +291,7 @@ export async function pollProcessingPayouts(olderThanSec = 120): Promise<number>
       }
       if ((await byId(p.id)).status !== "processing") settled++;
     } catch (e) {
-      console.error(`saque ${p.id}: consulta ao provedor falhou`, e);
+      logError("saque: consulta ao provedor falhou", e, { payout: p.id });
     }
   }
   return settled;

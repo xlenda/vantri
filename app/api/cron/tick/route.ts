@@ -3,6 +3,7 @@ import { lt, sql } from "drizzle-orm";
 import { sha256Hex } from "@/lib/crypto";
 import { db } from "@/lib/db/client";
 import { rateLimits, sessions } from "@/lib/db/schema";
+import { logError } from "@/lib/log";
 import { expireDueCharges } from "@/lib/services/charges";
 import { pollProcessingPayouts } from "@/lib/services/payouts";
 import { dispatchDue } from "@/lib/webhooks/dispatch";
@@ -22,6 +23,8 @@ const STEPS = {
   expired_charges: { run: () => expireDueCharges(), error: "falha ao expirar cobranças" },
   settled_payouts: { run: () => pollProcessingPayouts(), error: "falha ao consultar saques no provedor" },
   webhooks: { run: () => dispatchDue(), error: "falha ao enviar webhooks" },
+  // Corte de 1 dia: vale enquanto toda janela de rateLimit() for <= 86400 s (hoje a maior é 1 h). Janela maior
+  // seria zerada aqui antes de acabar: subir o corte junto.
   deleted_rate_limits: {
     run: async () =>
       (
@@ -50,7 +53,7 @@ export async function GET(req: Request): Promise<Response> {
     try {
       result[name] = await step.run();
     } catch (e) {
-      console.error(`cron: ${step.error}`, e);
+      logError(`cron: ${step.error}`, e);
       result[name] = null;
       errors[name] = step.error;
     }
