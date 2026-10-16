@@ -20,6 +20,8 @@ function csp(cdn = "") {
 }
 
 const nextConfig: NextConfig = {
+  // Servidores paralelos (um por agente) precisam de pastas de build separadas.
+  distDir: process.env.NEXT_DIST_DIR || ".next",
   poweredByHeader: false,
   async headers() {
     return [

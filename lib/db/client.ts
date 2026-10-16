@@ -32,13 +32,14 @@ export function setDb(d: Db): void {
 function devDb(): Db {
   const g = globalThis as { vantriDevDb?: Db };
   if (g.vantriDevDb) return g.vantriDevDb;
-  const { join } = process.getBuiltinModule("node:path");
+  const { join, resolve } = process.getBuiltinModule("node:path");
   const load = process.getBuiltinModule("node:module").createRequire(import.meta.url);
   const { PGlite } = load("@electric-sql/pglite") as typeof import("@electric-sql/pglite");
   const pglite = load("drizzle-orm/pglite") as typeof import("drizzle-orm/pglite");
   const { migrate } = load("drizzle-orm/pglite/migrator") as typeof import("drizzle-orm/pglite/migrator");
 
-  const dataDir = join(process.cwd(), ".data", "pglite");
+  // PGLITE_DIR separa o banco de servidores paralelos (o PGlite é de um processo só).
+  const dataDir = resolve(process.cwd(), process.env.PGLITE_DIR || join(".data", "pglite"));
   process.getBuiltinModule("node:fs").mkdirSync(dataDir, { recursive: true }); // o PGlite só cria o último nível
   const raw = new PGlite(dataDir);
   const ready = migrate(pglite.drizzle(raw), { migrationsFolder: join(process.cwd(), "drizzle") });
