@@ -161,6 +161,12 @@ it("rejects amount 0, -1, 1.5, '100', 10000001, and amount <= fee", async () => 
   await rejects(createCharge(m, { external_ref: "x", amount: 1000, description: "d".repeat(141) }), "invalid_request");
   await rejects(createCharge(m, { external_ref: "x", amount: 1000, merchant_id: m }), "invalid_request");
   await rejects(createCharge(m, "lixo"), "invalid_request");
+  // Mensagens do helper compartilhado (lib/validation.ts), sem ecoar o valor recebido.
+  await expect(createCharge(m, { external_ref: "x", amount: 1000, merchant_id: m })).rejects.toThrow(
+    /^Campo não permitido: merchant_id\.$/,
+  );
+  await expect(createCharge(m, { external_ref: "x", amount: "100" })).rejects.toThrow(/^Campo inválido: amount\.$/);
+  await expect(createCharge(m, "lixo")).rejects.toThrow(/^Campo inválido: entrada\.$/);
 
   // Fixo 100: amount 100 → taxa 101 → recusa; 102 → taxa 102 → recusa; 103 passa.
   const fixed = await activeMerchant(2, { feeInFixedCents: 100 });
@@ -203,6 +209,21 @@ it("paid event credits net once", async () => {
 
   expect(await applyChargePaid(event)).toBe("credited");
   expect(await getBalance(m)).toEqual({ available: 14767, blocked: 0, total: 14767 });
+  const entries = await d
+    .select({
+      kind: ledgerEntries.kind,
+      amountCents: ledgerEntries.amountCents,
+      bucket: ledgerEntries.bucket,
+      refType: ledgerEntries.refType,
+      refId: ledgerEntries.refId,
+    })
+    .from(ledgerEntries)
+    .where(eq(ledgerEntries.merchantId, m))
+    .orderBy(ledgerEntries.kind);
+  expect(entries).toEqual([
+    { kind: "cash_in", amountCents: 14990, bucket: "available", refType: "charge", refId: charge.id },
+    { kind: "fee_in", amountCents: -223, bucket: "available", refType: "charge", refId: charge.id },
+  ]);
   const paid = await getCharge(m, charge.id);
   expect(paid).toMatchObject({
     status: "paid",
@@ -228,6 +249,11 @@ it("paid event credits net once", async () => {
   expect(await d.select().from(ledgerEntries)).toHaveLength(2);
   expect(await deliveries("charge.paid")).toHaveLength(1);
   expect(await getCharge(m, charge.id)).toMatchObject({ endToEndId: event.endToEndId, payerName: "Pagador Simulado" });
+
+  // Paga não expira depois do vencimento.
+  expect(await expireDueCharges(new Date(Date.now() + 2 * 86_400_000))).toBe(0);
+  expect((await getCharge(m, charge.id))?.status).toBe("paid");
+  expect(await deliveries("charge.expired")).toHaveLength(0);
 });
 
 it("paid event for unknown charge → unknown", async () => {
@@ -250,6 +276,12 @@ it("paid after expiry still credits and status=paid", async () => {
   expect(await applyChargePaid(simulator.simulatePaid(charge.providerChargeId))).toBe("credited");
   expect((await getCharge(m, charge.id))?.status).toBe("paid");
   expect((await getBalance(m)).available).toBe(14767);
+
+  // Paga e vencida nunca volta a expirar: nem no cron, nem na leitura.
+  expect(await expireDueCharges(new Date(Date.now() + 301_000))).toBe(0);
+  await d.update(charges).set({ expiresAt: new Date(Date.now() - 1000) }).where(eq(charges.id, charge.id));
+  expect((await getCharge(m, charge.id))?.status).toBe("paid");
+  expect(await deliveries("charge.expired")).toHaveLength(1);
 });
 
 it("getCharge expires a pending charge past due and emits charge.expired once", async () => {
@@ -276,7 +308,7 @@ it("listCharges pages newest first, filters by status and stays inside the merch
   const m = await activeMerchant(1);
   const ids: string[] = [];
   for (let i = 0; i < 3; i++) ids.push((await createCharge(m, { external_ref: `p${i}`, amount: 1000 + i })).charge.id);
-  await createCharge(await activeMerchant(2), { external_ref: "p0", amount: 1000 });
+  const foreign = (await createCharge(await activeMerchant(2), { external_ref: "p0", amount: 1000 })).charge.id;
   await d.update(charges).set({ status: "paid" }).where(eq(charges.id, ids[1]));
 
   const page1 = await listCharges(m, { limit: 2 });
@@ -285,6 +317,8 @@ it("listCharges pages newest first, filters by status and stays inside the merch
   const page2 = await listCharges(m, { limit: 2, cursor: page1.nextCursor! });
   expect(page2.data.map((c) => c.id)).toEqual([ids[0]]);
   expect(page2.nextCursor).toBeNull();
+  // Id de cobrança de outro lojista (mais nova que as de m) não serve de cursor.
+  expect(await listCharges(m, { cursor: foreign })).toEqual({ data: [], nextCursor: null });
 
   expect((await listCharges(m)).data).toHaveLength(3);
   expect((await listCharges(m, { status: "paid" })).data.map((c) => c.id)).toEqual([ids[1]]);

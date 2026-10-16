@@ -8,6 +8,7 @@ import { db, type Tx } from "@/lib/db/client";
 import { auditLog, merchants, users } from "@/lib/db/schema";
 import { getProvider } from "@/lib/provider";
 import type { PixProvider } from "@/lib/provider/types";
+import { parseOr } from "@/lib/validation";
 
 export type MerchantErrorCode =
   | "invalid_request"
@@ -52,16 +53,8 @@ const cents = z.int().min(0).max(100_000);
 const feesSchema = z.strictObject({ feeInBps: bps, feeInFixedCents: cents, feeOutBps: bps, feeOutFixedCents: cents });
 export type Fees = z.infer<typeof feesSchema>;
 
-function parse<T extends z.ZodType>(schema: T, input: unknown): z.output<T> {
-  const r = schema.safeParse(input);
-  if (r.success) return r.data;
-  const i = r.error.issues[0];
-  const msg =
-    i.code === "unrecognized_keys"
-      ? `Campo não permitido: ${i.keys.join(", ")}.`
-      : `Campo inválido: ${i.path.join(".") || "entrada"}.`;
-  throw new MerchantError("invalid_request", msg);
-}
+const parse = <T extends z.ZodType>(schema: T, input: unknown) =>
+  parseOr(schema, input, (msg) => new MerchantError("invalid_request", msg));
 
 type MerchantInput = z.output<typeof adminCreateSchema>;
 

@@ -10,6 +10,7 @@ import { lockMerchant, postEntries } from "@/lib/money/ledger";
 import { getProvider } from "@/lib/provider";
 import type { ProviderEvent } from "@/lib/provider/types";
 import { emit } from "@/lib/services/events";
+import { parseOr } from "@/lib/validation";
 
 export type ChargeRow = typeof charges.$inferSelect;
 
@@ -48,16 +49,8 @@ const listSchema = z.strictObject({
   cursor: z.uuid().optional(),
 });
 
-function parse<T extends z.ZodType>(schema: T, input: unknown): z.output<T> {
-  const r = schema.safeParse(input);
-  if (r.success) return r.data;
-  const i = r.error.issues[0];
-  const msg =
-    i.code === "unrecognized_keys"
-      ? `Campo não permitido: ${i.keys.join(", ")}.`
-      : `Campo inválido: ${i.path.join(".") || "entrada"}.`;
-  throw new ChargeError("invalid_request", msg);
-}
+const parse = <T extends z.ZodType>(schema: T, input: unknown) =>
+  parseOr(schema, input, (msg) => new ChargeError("invalid_request", msg));
 
 const isUuid = (s: string) => z.uuid().safeParse(s).success;
 
@@ -205,8 +198,9 @@ export async function listCharges(
         eq(charges.merchantId, merchantId),
         status && eq(charges.status, status),
         // Compara no banco: created_at tem microssegundos, Date do JS só milissegundos.
+        // Cursor de outro lojista não acha linha → página vazia.
         cursor
-          ? sql`(${charges.createdAt}, ${charges.id}) < (select c.created_at, c.id from ${charges} c where c.id = ${cursor})`
+          ? sql`(${charges.createdAt}, ${charges.id}) < (select c.created_at, c.id from ${charges} c where c.id = ${cursor} and c.merchant_id = ${merchantId})`
           : undefined,
       ),
     )
