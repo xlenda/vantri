@@ -52,31 +52,25 @@ async function attemptLogin(
   const { user, merchantStatus } = row;
   const fail = (reason: FailReason) => ({ result: { ok: false as const, reason }, userId: user.id });
 
-  // Reserva a tentativa ANTES do argon2, num UPDATE condicional com a hora do banco: sob
-  // concorrência no máximo MAX_FAILED_LOGINS passam; as demais já saem como bloqueadas.
+  // Reserva a tentativa ANTES do argon2, num único UPDATE condicional com a hora do banco:
+  // a reserva que chega a MAX_FAILED_LOGINS já grava o bloqueio. Assim, sob concorrência no
+  // máximo MAX_FAILED_LOGINS passam, e um processo que morra depois da reserva nunca deixa o
+  // usuário preso: o bloqueio vence sozinho e a contagem recomeça. (O SET vê a linha antiga.)
+  const lockExpired = sql`(${users.lockedUntil} IS NOT NULL AND ${users.lockedUntil} <= now())`;
+  const newCount = sql`(CASE WHEN ${lockExpired} THEN 1 ELSE ${users.failedLogins} + 1 END)`;
   const [attempt] = await db()
     .update(users)
-    .set({ failedLogins: sql`${users.failedLogins} + 1` })
-    .where(
-      and(
-        eq(users.id, user.id),
-        lt(users.failedLogins, MAX_FAILED_LOGINS),
-        or(isNull(users.lockedUntil), lte(users.lockedUntil, sql`now()`)),
-      ),
-    )
+    .set({
+      failedLogins: newCount,
+      lockedUntil: sql`CASE WHEN ${newCount} >= ${MAX_FAILED_LOGINS} THEN now() + interval '15 minutes' ELSE NULL END`,
+    })
+    .where(and(eq(users.id, user.id), or(isNull(users.lockedUntil), lte(users.lockedUntil, sql`now()`))))
     .returning({ failedLogins: users.failedLogins });
   if (!attempt) return fail("locked");
 
-  if (!(await verifyPassword(user.passwordHash, password))) {
-    if (attempt.failedLogins >= MAX_FAILED_LOGINS) {
-      await db()
-        .update(users)
-        .set({ failedLogins: 0, lockedUntil: sql`now() + interval '15 minutes'` })
-        .where(eq(users.id, user.id));
-    }
-    return fail("invalid");
-  }
-  await db().update(users).set({ failedLogins: 0 }).where(eq(users.id, user.id));
+  if (!(await verifyPassword(user.passwordHash, password))) return fail("invalid");
+  // Senha certa desfaz a reserva, inclusive o bloqueio gravado por ela (5ª tentativa certa entra).
+  await db().update(users).set({ failedLogins: 0, lockedUntil: null }).where(eq(users.id, user.id));
 
   // Situação do lojista só é revelada a quem acertou a senha.
   if (user.role === "merchant") {

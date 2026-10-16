@@ -126,6 +126,27 @@ describe("login", () => {
     expect(u.failedLogins).toBe(0);
   });
 
+  it("lock survives a crash after the 5th reservation", async () => {
+    const id = await newUser("cr@x.com");
+    const [{ passwordHash }] = await d.select().from(users).where(eq(users.id, id));
+    // "Queda" real depois da reserva: hash malformado faz o verifyPassword lançar,
+    // então nenhuma escrita posterior acontece.
+    await d.update(users).set({ passwordHash: "hash-corrompido" }).where(eq(users.id, id));
+    for (let i = 0; i < 5; i++) await expect(login("cr@x.com", PASS, ip())).rejects.toThrow();
+    await d.update(users).set({ passwordHash }).where(eq(users.id, id));
+
+    expect(await login("cr@x.com", PASS, ip())).toEqual({ ok: false, reason: "locked" });
+    let [u] = await d.select().from(users).where(eq(users.id, id));
+    expect(u.lockedUntil).not.toBeNull(); // o bloqueio foi gravado pela própria reserva
+
+    await d.update(users).set({ lockedUntil: sql`now() - interval '1 second'` }).where(eq(users.id, id));
+    expect(await login("cr@x.com", "errada", ip())).toEqual({ ok: false, reason: "invalid" });
+    [u] = await d.select().from(users).where(eq(users.id, id));
+    expect(u.failedLogins).toBe(1); // contagem recomeçou
+    expect(u.lockedUntil).toBeNull();
+    expect((await login("cr@x.com", PASS, ip())).ok).toBe(true);
+  });
+
   it("login writes an access log with the ip", async () => {
     const id = await newUser("al@x.com");
     const r = await login("al@x.com", PASS, "200.1.2.3");
