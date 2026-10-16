@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 194 48" width="194" height="48" role="img" aria-label="Vantri">
+  <path d="M4 6h10l20 36H24z" fill="#3b37f2"/>
+  <path d="M34 6h10L24 42H14z" fill="#0e1120"/>
+  <path d="M24 24l5 9-5 9-5-9z" fill="#c9f25b"/>
+  <g transform="translate(58 6) scale(1.2)">
+    <path d="M2.5 12.5l7 15 7-15M41 20a7.75 7.75 0 1 1-15.5 0a7.75 7.75 0 1 1 15.5 0M41 12.5v15M50 27.5v-15M50 19a6.5 6.5 0 0 1 13 0v8.5M76 4v18a5.5 5.5 0 0 0 5.5 5.5H84M71.5 12.5H83M93 27.5v-15M93 20a7.5 7.5 0 0 1 7.5-7.5H102M110 12.5v15" fill="none" stroke="#0e1120" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="110" cy="4.5" r="3" fill="#0e1120"/>
+  </g>
+</svg>
