@@ -5,6 +5,7 @@ import { GET as tick } from "@/app/api/cron/tick/route";
 import { POST as webhook } from "@/app/api/provider/webhook/route";
 import { type Db, setDb } from "@/lib/db/client";
 import { charges, ledgerEntries, merchants, payouts, rateLimits, sessions, users } from "@/lib/db/schema";
+import { logError } from "@/lib/log";
 import { getBalance, postEntries } from "@/lib/money/ledger";
 import { simulator } from "@/lib/provider/simulator";
 import { createCharge } from "@/lib/services/charges";
@@ -122,6 +123,18 @@ it("unknown MED (opened and closed) → one log line each, provider ids only", a
     ["webhook do provedor: MED sim_med_nao_existe desconhecido, ignorado"],
   ]);
   log.mockRestore();
+});
+
+it("logError keeps a system error code but never the message", () => {
+  const err = vi.spyOn(console, "error").mockImplementation(() => {});
+  const net = Object.assign(new Error("connect ECONNRESET para a chave fulana@pix.com"), { code: "ECONNRESET" });
+  logError("saque: provedor falhou", net, { payout: "p1" });
+  // Código fora do formato (minúsculo, com dado) não sai.
+  logError("x", Object.assign(new Error("e"), { code: "fulana@pix.com" }));
+  const out = err.mock.calls.flat().map(String).join("\n");
+  expect(err.mock.calls[0]).toEqual(["saque: provedor falhou", '{"payout":"p1","error":"Error","code":"ECONNRESET"}']);
+  expect(out).not.toContain("fulana@pix.com");
+  err.mockRestore();
 });
 
 it("failed query with payer data → log has no payer data nor query params", async () => {
