@@ -56,6 +56,8 @@ export const users = pgTable(
     merchantId: uuid("merchant_id").references(() => merchants.id),
     totpSecretEnc: text("totp_secret_enc"),
     totpEnabled: boolean("totp_enabled").notNull().default(false),
+    // Último passo TOTP aceito (RFC 6238 §5.2): o mesmo código não vale duas vezes.
+    totpLastStep: integer("totp_last_step"),
     mustChangePassword: boolean("must_change_password").notNull().default(false),
     failedLogins: integer("failed_logins").notNull().default(0),
     lockedUntil: tstz("locked_until"),
