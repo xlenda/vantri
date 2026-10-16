@@ -17,13 +17,15 @@ const newId = (prefix: string) => prefix + randomUUID().replaceAll("-", "");
 const newEndToEndId = () => "E00000000" + Array.from({ length: 23 }, () => ALNUM[randomInt(ALNUM.length)]).join("");
 
 const id = z.string().min(1);
+// z.coerce.date aceitaria null e 0 como 1970: só data ISO em UTC.
+const isoDate = z.iso.datetime().transform((s) => new Date(s));
 const webhookBody = z.strictObject({
   events: z.array(
     z.discriminatedUnion("type", [
       z.strictObject({
         type: z.literal("charge.paid"),
         providerChargeId: id,
-        paidAt: z.coerce.date(),
+        paidAt: isoDate,
         endToEndId: id,
         payerName: z.string().optional(),
         payerDocument: z.string().optional(),
@@ -36,7 +38,7 @@ const webhookBody = z.strictObject({
         providerCaseId: id,
         amountCents: z.number().int().positive(),
         reason: z.string(),
-        deadline: z.coerce.date(),
+        deadline: isoDate,
       }),
       z.strictObject({
         type: z.literal("med.closed"),
@@ -46,6 +48,9 @@ const webhookBody = z.strictObject({
     ]),
   ),
 });
+
+/** Segredo ausente, vazio ou errado: a rota responde 401 (qualquer outro erro do parse vira 400). */
+export class WebhookAuthError extends Error {}
 
 function secretOk(got: string | null): boolean {
   const expected = process.env.SIMULATOR_WEBHOOK_SECRET;
@@ -92,7 +97,7 @@ const provider = {
   },
 
   async parseWebhook(req) {
-    if (!secretOk(req.headers.get("x-simulator-secret"))) throw new Error("segredo do webhook do simulador inválido");
+    if (!secretOk(req.headers.get("x-simulator-secret"))) throw new WebhookAuthError("segredo do webhook do simulador inválido");
     let json: unknown;
     try {
       json = JSON.parse(req.rawBody);

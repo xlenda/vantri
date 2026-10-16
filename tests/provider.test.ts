@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildBrCode, crc16 } from "@/lib/br/brcode";
 import { getProvider } from "@/lib/provider";
-import { simulator } from "@/lib/provider/simulator";
+import { simulator, WebhookAuthError } from "@/lib/provider/simulator";
 import type { PixProvider } from "@/lib/provider/types";
 
 // Chamadas da interface passam pelo tipo PixProvider, como no código de produção.
@@ -156,6 +156,38 @@ describe("simulador", () => {
     await expect(
       simulator.parseWebhook({ headers, rawBody: JSON.stringify({ events: [{ type: "charge.paid", providerChargeId: "x" }] }) }),
     ).rejects.toThrow("corpo do webhook do simulador inválido");
+  });
+
+  it("parseWebhook rejects null, 0 and non-ISO dates", async () => {
+    vi.stubEnv("SIMULATOR_WEBHOOK_SECRET", "certo");
+    const headers = new Headers({ "x-simulator-secret": "certo" });
+    const paid = simulator.simulatePaid("sim_ch_1");
+    const med = simulator.simulateMed("sim_ch_1", 14990);
+    const bodies = [
+      { ...paid, paidAt: null },
+      { ...paid, paidAt: 0 },
+      { ...paid, paidAt: "2026-10-16" },
+      { ...med, deadline: null },
+      { ...med, deadline: 0 },
+    ];
+    for (const e of bodies) {
+      await expect(simulator.parseWebhook({ headers, rawBody: JSON.stringify({ events: [e] }) })).rejects.toThrow(
+        "corpo do webhook do simulador inválido",
+      );
+    }
+  });
+
+  it("only auth failures throw WebhookAuthError", async () => {
+    vi.stubEnv("SIMULATOR_WEBHOOK_SECRET", "certo");
+    const rawBody = '{"events":[]}';
+    for (const headers of [new Headers({ "x-simulator-secret": "errado" }), new Headers(), new Headers({ "x-simulator-secret": "" })]) {
+      await expect(simulator.parseWebhook({ headers, rawBody })).rejects.toBeInstanceOf(WebhookAuthError);
+    }
+    const bad = await simulator
+      .parseWebhook({ headers: new Headers({ "x-simulator-secret": "certo" }), rawBody: "{" })
+      .catch((e: unknown) => e);
+    expect(bad).toBeInstanceOf(Error);
+    expect(bad).not.toBeInstanceOf(WebhookAuthError);
   });
 });
 
