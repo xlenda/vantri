@@ -3,12 +3,16 @@
 import { redirect } from "next/navigation";
 import { z } from "zod";
 import { changePassword, confirmTotpSetup } from "@/lib/auth/session";
-import { accessSession, formText, homeFor } from "./acesso";
+import { accessSession, formText, homeFor, totpCode } from "./acesso";
 
 export async function confirmTotpAction(_prev: { error: string } | undefined, fd: FormData) {
   const { s, token } = await accessSession();
-  if (!(await confirmTotpSetup(s.user.id, formText(fd, "code").replace(/\s/g, ""), token))) {
-    return { error: "Código inválido. Confira se a data e a hora do celular estão automáticas e tente de novo." };
+  const code = totpCode(fd);
+  if (!code || !(await confirmTotpSetup(s.user.id, code, token))) {
+    return {
+      error:
+        "Código inválido. Se você recarregou esta página, a chave mudou: apague do app a entrada antiga da Vantri e leia o QR code de novo. Confira também se a data e a hora do celular estão automáticas.",
+    };
   }
   redirect(homeFor(s.user.role));
 }

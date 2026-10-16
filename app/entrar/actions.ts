@@ -5,7 +5,7 @@ import { redirect } from "next/navigation";
 import { z } from "zod";
 import { cookieOptions, login, type LoginResult, logout, passTotp, SESSION_COOKIE } from "@/lib/auth/session";
 import { verifyTurnstile } from "@/lib/turnstile";
-import { accessSession, clientIp, formText, GENERIC_ERROR, homeFor, TURNSTILE_ERROR } from "../conta/acesso";
+import { accessSession, clientIp, formText, GENERIC_ERROR, homeFor, totpCode, TURNSTILE_ERROR } from "../conta/acesso";
 
 export type LoginState = { error: string; email: string } | undefined;
 
@@ -40,7 +40,8 @@ export async function loginAction(_prev: LoginState, fd: FormData): Promise<Logi
 
 export async function totpLoginAction(_prev: { error: string } | undefined, fd: FormData) {
   const { s, token } = await accessSession();
-  if (!(await passTotp(token, formText(fd, "code").replace(/\s/g, "")))) {
+  const code = totpCode(fd);
+  if (!code || !(await passTotp(token, code))) {
     return { error: "Código inválido ou já usado. Confira o app autenticador e tente de novo." };
   }
   redirect(homeFor(s.user.role));
