@@ -1,0 +1,317 @@
+import { randomBytes } from "node:crypto";
+import { eq } from "drizzle-orm";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { verifyPassword } from "@/lib/auth/password";
+import { lookupCnpj } from "@/lib/br/cnpj-lookup";
+import { isValidCnpj, isValidCpf, maskDocument } from "@/lib/br/documents";
+import { decrypt, sha256Hex } from "@/lib/crypto";
+import { type Db, setDb } from "@/lib/db/client";
+import { auditLog, merchants, users } from "@/lib/db/schema";
+import { simulator } from "@/lib/provider/simulator";
+import {
+  adminCreateMerchant,
+  approveMerchant,
+  reactivateMerchant,
+  rejectMerchant,
+  signupMerchant,
+  suspendMerchant,
+  updateFees,
+} from "@/lib/services/merchants";
+import { createTestDb } from "./helpers/db";
+
+let d: Db;
+let adminId: string;
+
+beforeAll(() => {
+  process.env.APP_ENCRYPTION_KEY = randomBytes(32).toString("base64");
+  process.env.PIX_PROVIDER = "simulator";
+  process.env.SIMULATOR_WEBHOOK_SECRET = "segredo-de-teste";
+});
+
+beforeEach(async () => {
+  d = await createTestDb();
+  setDb(d);
+  const [a] = await d
+    .insert(users)
+    .values({ email: "admin@vantri.test", passwordHash: "x", role: "admin" })
+    .returning({ id: users.id });
+  adminId = a.id;
+});
+
+afterEach(() => vi.restoreAllMocks());
+
+const CPF = "52998224725";
+const CNPJ = "11222333000181";
+
+const cpfInput = (over: Record<string, unknown> = {}) => ({
+  legalName: "Maria da Silva",
+  tradeName: "Curso da Maria",
+  documentType: "cpf",
+  document: CPF,
+  segment: "cursos",
+  email: "maria@exemplo.com",
+  password: "senha-bem-longa-123",
+  ...over,
+});
+
+const cnpjInput = (over: Record<string, unknown> = {}) =>
+  cpfInput({ legalName: "Escola Online LTDA", documentType: "cnpj", document: CNPJ, ...over });
+
+// Admin não manda senha: ela é gerada.
+const adminInput = (over: Record<string, unknown> = {}) => {
+  const input: Record<string, unknown> = cpfInput(over);
+  delete input.password;
+  return input;
+};
+
+const lookupOk =(cnaes: string[], active = true) => async () =>
+  ({ ok: true, legalName: "ESCOLA ONLINE LTDA", cnaes, active }) as const;
+
+async function errorCode(p: Promise<unknown>): Promise<string | undefined> {
+  return p.then(
+    () => undefined,
+    (e: { code?: string }) => e.code,
+  );
+}
+
+const counts = async () => ({
+  merchants: (await d.select().from(merchants)).length,
+  users: (await d.select().from(users)).length - 1, // menos o admin
+});
+
+const actions = async () => (await d.select().from(auditLog)).map((r) => r.action);
+
+describe("documents", () => {
+  it("valida CPF e CNPJ pelo dígito verificador", () => {
+    expect(isValidCpf("52998224725")).toBe(true);
+    expect(isValidCpf("11111111111")).toBe(false);
+    expect(isValidCpf("52998224724")).toBe(false);
+    expect(isValidCnpj("11222333000181")).toBe(true);
+    expect(isValidCnpj("11222333000180")).toBe(false);
+    expect(isValidCnpj("00000000000000")).toBe(false);
+  });
+
+  it("mascara CPF e CNPJ", () => {
+    expect(maskDocument("12345678901")).toBe("***.456.789-**");
+    expect(maskDocument("12345678000195")).toBe("12.345.678/****-**");
+  });
+});
+
+describe("lookupCnpj", () => {
+  const brasilApi = (status: number, body: unknown) =>
+    vi.fn<typeof fetch>(async () => new Response(JSON.stringify(body), { status }));
+
+  it("lê razão social, CNAEs (com zero à esquerda) e situação", async () => {
+    const fetcher = brasilApi(200, {
+      razao_social: "ESCOLA ONLINE LTDA",
+      cnae_fiscal: 8599604,
+      cnaes_secundarios: [{ codigo: 111301 }, { codigo: 9200399 }],
+      descricao_situacao_cadastral: "ATIVA",
+    });
+    expect(await lookupCnpj("11.222.333/0001-81", fetcher)).toEqual({
+      ok: true,
+      legalName: "ESCOLA ONLINE LTDA",
+      cnaes: ["8599604", "0111301", "9200399"],
+      active: true,
+    });
+    expect(String(fetcher.mock.calls[0][0])).toBe("https://brasilapi.com.br/api/cnpj/v1/11222333000181");
+    expect(fetcher.mock.calls[0][1]?.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("devolve ok:false em 404, erro de rede ou corpo inesperado", async () => {
+    expect(await lookupCnpj(CNPJ, brasilApi(404, { message: "CNPJ não encontrado" }))).toEqual({ ok: false });
+    expect(await lookupCnpj(CNPJ, brasilApi(200, { razao_social: "X" }))).toEqual({ ok: false });
+    const down = vi.fn(async () => {
+      throw new TypeError("fetch failed");
+    });
+    expect(await lookupCnpj(CNPJ, down)).toEqual({ ok: false });
+  });
+});
+
+describe("signupMerchant", () => {
+  it("signup rejects betting CNAE (principal ou secundário)", async () => {
+    const lookup = lookupOk(["9200399"]);
+    await expect(signupMerchant(cnpjInput(), { lookup })).rejects.toMatchObject({
+      code: "betting_cnae",
+      message: "Não atendemos apostas.",
+    });
+    const secundario = lookupOk(["8599604", "92.00-3-01"]);
+    expect(await errorCode(signupMerchant(cnpjInput(), { lookup: secundario }))).toBe("betting_cnae");
+    expect(await counts()).toEqual({ merchants: 0, users: 0 });
+  });
+
+  it("signup rejects inactive CNPJ", async () => {
+    expect(await errorCode(signupMerchant(cnpjInput(), { lookup: lookupOk(["8599604"], false) }))).toBe(
+      "cnpj_inactive",
+    );
+    expect(await counts()).toEqual({ merchants: 0, users: 0 });
+  });
+
+  it("signup rejects segment 'apostas'", async () => {
+    expect(await errorCode(signupMerchant(cpfInput({ segment: "apostas" })))).toBe("segment_not_allowed");
+    expect(await counts()).toEqual({ merchants: 0, users: 0 });
+  });
+
+  it("signup rejects invalid document", async () => {
+    expect(await errorCode(signupMerchant(cpfInput({ document: "111.111.111-11" })))).toBe("invalid_document");
+    expect(await errorCode(signupMerchant(cpfInput({ document: "5299822472a5" })))).toBe("invalid_document");
+    expect(await errorCode(signupMerchant(cnpjInput({ document: CPF })))).toBe("invalid_document");
+  });
+
+  it("signup ignores extra fields (zod strict rejeita)", async () => {
+    const input = cpfInput({ role: "admin", status: "active", fee_in_bps: 0 });
+    expect(await errorCode(signupMerchant(input))).toBe("invalid_request");
+    expect(await errorCode(signupMerchant(cpfInput({ password: "curta" })))).toBe("invalid_request");
+    expect(await counts()).toEqual({ merchants: 0, users: 0 });
+  });
+
+  it("signup stores document encrypted", async () => {
+    const { merchantId, userId } = await signupMerchant(cpfInput({ document: "529.982.247-25" }));
+    const [m] = await d.select().from(merchants).where(eq(merchants.id, merchantId));
+    expect(m.documentEnc).not.toContain(CPF);
+    expect(decrypt(m.documentEnc)).toBe(CPF);
+    expect(m.documentHash).toBe(sha256Hex(CPF));
+    expect(m).toMatchObject({ status: "pending", needsManualReview: false, providerAccountId: null, feeInBps: 149 });
+    const [u] = await d.select().from(users).where(eq(users.id, userId));
+    expect(u).toMatchObject({ role: "merchant", merchantId, mustChangePassword: false });
+    expect(await verifyPassword(u.passwordHash, "senha-bem-longa-123")).toBe(true);
+  });
+
+  it("signup with lookup down sets needs_manual_review", async () => {
+    const { merchantId } = await signupMerchant(cnpjInput(), { lookup: async () => ({ ok: false }) });
+    const [m] = await d.select().from(merchants).where(eq(merchants.id, merchantId));
+    expect(m).toMatchObject({ status: "pending", needsManualReview: true });
+
+    const ok = await signupMerchant(cnpjInput({ document: "11444777000161", email: "b@exemplo.com" }), {
+      lookup: lookupOk(["8599604"]),
+    });
+    const [m2] = await d.select().from(merchants).where(eq(merchants.id, ok.merchantId));
+    expect(m2.needsManualReview).toBe(false);
+  });
+
+  it("signup normaliza e-mail e recusa documento ou e-mail repetido, inclusive em corrida", async () => {
+    const { userId } = await signupMerchant(cpfInput({ email: "  Maria@Exemplo.COM " }));
+    const [u] = await d.select().from(users).where(eq(users.id, userId));
+    expect(u.email).toBe("maria@exemplo.com");
+
+    expect(await errorCode(signupMerchant(cpfInput({ email: "outra@exemplo.com" })))).toBe("document_taken");
+    expect(await errorCode(signupMerchant(cnpjInput({ email: "MARIA@exemplo.com" }), { lookup: lookupOk([]) }))).toBe(
+      "email_taken",
+    );
+
+    const raced = await Promise.allSettled([
+      signupMerchant(cnpjInput({ email: "a@corrida.com" }), { lookup: lookupOk([]) }),
+      signupMerchant(cnpjInput({ email: "b@corrida.com" }), { lookup: lookupOk([]) }),
+    ]);
+    expect(raced.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    const lost = raced.find((r) => r.status === "rejected") as PromiseRejectedResult;
+    expect(lost.reason.code).toBe("document_taken");
+    expect(await counts()).toEqual({ merchants: 2, users: 2 });
+  });
+});
+
+describe("admin", () => {
+  it("approve calls provider.createAccount and sets active + provider_account_id", async () => {
+    const spy = vi.spyOn(simulator, "createAccount");
+    const { merchantId } = await signupMerchant(cpfInput());
+    await approveMerchant(merchantId, adminId);
+
+    expect(spy).toHaveBeenCalledWith({
+      merchantId,
+      legalName: "Maria da Silva",
+      document: CPF,
+      documentType: "cpf",
+      email: "maria@exemplo.com",
+    });
+    const [m] = await d.select().from(merchants).where(eq(merchants.id, merchantId));
+    expect(m.status).toBe("active");
+    expect(m.providerAccountId).toMatch(/^sim_acc_/);
+    expect(m.approvedAt).toBeInstanceOf(Date);
+    const [log] = await d.select().from(auditLog);
+    expect(log).toMatchObject({ actorUserId: adminId, action: "merchant.approve", meta: { merchantId } });
+
+    expect(await errorCode(approveMerchant(merchantId, adminId))).toBe("invalid_status");
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  it("approve com provedor fora do ar deixa o lojista pending", async () => {
+    vi.spyOn(simulator, "createAccount").mockRejectedValueOnce(new Error("provedor fora do ar"));
+    const { merchantId } = await signupMerchant(cpfInput());
+    await expect(approveMerchant(merchantId, adminId)).rejects.toThrow("provedor fora do ar");
+    const [m] = await d.select().from(merchants).where(eq(merchants.id, merchantId));
+    expect(m).toMatchObject({ status: "pending", providerAccountId: null, approvedAt: null });
+    expect(await actions()).toEqual([]);
+  });
+
+  it("adminCreateMerchant returns temp password that verifies and must_change_password=true", async () => {
+    const spy = vi.spyOn(simulator, "createAccount");
+    const r = await adminCreateMerchant(adminInput({ email: " Cliente@Exemplo.com" }), adminId);
+
+    expect(r.email).toBe("cliente@exemplo.com");
+    expect(r.tempPassword).toMatch(/^[0-9A-Za-z]{16}$/);
+    const [u] = await d.select().from(users).where(eq(users.email, r.email));
+    expect(u).toMatchObject({ role: "merchant", merchantId: r.merchantId, mustChangePassword: true });
+    expect(await verifyPassword(u.passwordHash, r.tempPassword)).toBe(true);
+
+    const [m] = await d.select().from(merchants).where(eq(merchants.id, r.merchantId));
+    expect(m.status).toBe("active");
+    expect(m.providerAccountId).toMatch(/^sim_acc_/);
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(await actions()).toEqual(["merchant.create"]);
+
+    // Senha no input do admin é campo desconhecido.
+    expect(await errorCode(adminCreateMerchant(cpfInput({ email: "x@y.com" }), adminId))).toBe("invalid_request");
+  });
+
+  it("adminCreateMerchant com provedor fora do ar não grava nada", async () => {
+    vi.spyOn(simulator, "createAccount").mockRejectedValueOnce(new Error("provedor fora do ar"));
+    await expect(adminCreateMerchant(adminInput(), adminId)).rejects.toThrow("provedor fora do ar");
+    expect(await counts()).toEqual({ merchants: 0, users: 0 });
+  });
+
+  it("reject, suspend e reactivate só a partir do status certo", async () => {
+    const a = (await signupMerchant(cpfInput())).merchantId;
+    const b = (await signupMerchant(cnpjInput({ email: "b@exemplo.com" }), { lookup: lookupOk([]) })).merchantId;
+    const status = async (id: string) =>
+      (await d.select({ s: merchants.status }).from(merchants).where(eq(merchants.id, id)))[0].s;
+
+    expect(await errorCode(suspendMerchant(a, adminId))).toBe("invalid_status");
+    await rejectMerchant(a, adminId);
+    expect(await status(a)).toBe("rejected");
+    expect(await errorCode(approveMerchant(a, adminId))).toBe("invalid_status");
+
+    await approveMerchant(b, adminId);
+    await suspendMerchant(b, adminId);
+    expect(await status(b)).toBe("suspended");
+    await reactivateMerchant(b, adminId);
+    expect(await status(b)).toBe("active");
+
+    expect(await errorCode(rejectMerchant("00000000-0000-4000-8000-000000000000", adminId))).toBe("not_found");
+    expect(await errorCode(rejectMerchant("nao-e-uuid", adminId))).toBe("not_found");
+    expect(await actions()).toEqual([
+      "merchant.reject",
+      "merchant.approve",
+      "merchant.suspend",
+      "merchant.reactivate",
+    ]);
+  });
+
+  it("updateFees rejects 10001 bps", async () => {
+    const { merchantId } = await signupMerchant(cpfInput());
+    const fees = { feeInBps: 199, feeInFixedCents: 50, feeOutBps: 0, feeOutFixedCents: 150 };
+
+    expect(await errorCode(updateFees(merchantId, { ...fees, feeInBps: 10001 }, adminId))).toBe("invalid_request");
+    expect(await errorCode(updateFees(merchantId, { ...fees, feeOutFixedCents: 100001 }, adminId))).toBe(
+      "invalid_request",
+    );
+    expect(await errorCode(updateFees(merchantId, { ...fees, feeInBps: 1.5 }, adminId))).toBe("invalid_request");
+    expect(await errorCode(updateFees(merchantId, { ...fees, feeOutBps: -1 }, adminId))).toBe("invalid_request");
+    expect(await actions()).toEqual([]);
+
+    await updateFees(merchantId, fees, adminId);
+    const [m] = await d.select().from(merchants).where(eq(merchants.id, merchantId));
+    expect(m).toMatchObject(fees);
+    const [log] = await d.select().from(auditLog);
+    expect(log).toMatchObject({ actorUserId: adminId, action: "merchant.update_fees", meta: { merchantId, ...fees } });
+  });
+});
