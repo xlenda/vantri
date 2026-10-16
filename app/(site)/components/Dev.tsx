@@ -125,6 +125,10 @@ function Webhook() {
           200 OK · tentativa 1 de 7
         </span>
         <span className="font-mono">exemplo · segredo whsec_exemplo</span>
+        <p className="w-full text-white/60">
+          A assinatura cobre o corpo cru, exatamente como chegou (JSON compacto). O JSON formatado acima é só para leitura: copiado assim,
+          não confere.
+        </p>
       </div>
     </div>
   );

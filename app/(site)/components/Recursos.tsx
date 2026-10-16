@@ -173,7 +173,7 @@ const PILARES = [
   ["Conta própria por lojista", `Cada lojista tem a sua conta na ${PSP_NAME}. Nada de saldo de todos misturado numa conta só.`],
   ["Cadastro com análise", "Com CPF ou CNPJ, todo cadastro é analisado antes de liberar o acesso ao painel."],
   ["Limites claros", "Cobrança de R$ 1,00 a R$ 100.000,00. Saque de até R$ 50.000,00 por pedido."],
-  ["Segredos só com hash", "Senhas e chaves de API ficam guardadas só como hash. A chave aparece uma única vez, na criação."],
+  ["Senhas e chaves de API com hash", "Senhas e chaves de API ficam guardadas só como hash. A chave aparece uma única vez, na criação."],
 ];
 
 export function Recursos() {
