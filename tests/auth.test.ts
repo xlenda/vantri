@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { generate } from "otplib";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { requireUser } from "@/lib/auth/guards";
@@ -17,7 +17,7 @@ import {
 } from "@/lib/auth/session";
 import { decrypt, encrypt, sha256Hex } from "@/lib/crypto";
 import { type Db, setDb } from "@/lib/db/client";
-import { merchants, rateLimits, sessions, users } from "@/lib/db/schema";
+import { accessLogs, merchants, rateLimits, sessions, users } from "@/lib/db/schema";
 import { rateLimit } from "@/lib/ratelimit";
 import { verifyTurnstile } from "@/lib/turnstile";
 import { createTestDb } from "./helpers/db";
@@ -78,6 +78,13 @@ async function loginToken(email: string): Promise<string> {
   return r.token;
 }
 
+/** Sessão que já passou pelo 2FA. */
+async function mfaToken(email: string): Promise<string> {
+  const token = await loginToken(email);
+  await d.update(sessions).set({ mfaPassed: true }).where(eq(sessions.id, sha256Hex(token)));
+  return token;
+}
+
 describe("login", () => {
   it("login locks after 5 wrong passwords", async () => {
     await newUser("a@x.com");
@@ -91,6 +98,48 @@ describe("login", () => {
     expect(mins).toBeGreaterThan(14);
     expect(mins).toBeLessThanOrEqual(15);
     expect(await d.select().from(sessions)).toHaveLength(0);
+  });
+
+  it("concurrent wrong passwords lock after at most 5", async () => {
+    await newUser("cc@x.com");
+    const from = ip();
+    const results = await Promise.all(Array.from({ length: 8 }, () => login("cc@x.com", "errada", from)));
+    const reasons = results.map((r) => (r.ok ? "ok" : r.reason));
+    expect(reasons.filter((r) => r === "invalid").length).toBeLessThanOrEqual(5);
+    expect(reasons.every((r) => r === "invalid" || r === "locked")).toBe(true);
+    expect(reasons).toContain("locked");
+    expect(await login("cc@x.com", PASS, from)).toEqual({ ok: false, reason: "locked" });
+  });
+
+  it("lock expires and counter restarts", async () => {
+    await newUser("le@x.com");
+    for (let i = 0; i < 5; i++) await login("le@x.com", "errada", ip());
+    expect(await login("le@x.com", PASS, ip())).toEqual({ ok: false, reason: "locked" });
+
+    // Tempo comparado no banco: vence o bloqueio pelo relógio do próprio Postgres.
+    await d.update(users).set({ lockedUntil: sql`now() - interval '1 second'` }).where(eq(users.email, "le@x.com"));
+    expect(await login("le@x.com", "errada", ip())).toEqual({ ok: false, reason: "invalid" });
+    let [u] = await d.select().from(users).where(eq(users.email, "le@x.com"));
+    expect(u.failedLogins).toBe(1); // recomeçou do zero
+    expect((await login("le@x.com", PASS, ip())).ok).toBe(true);
+    [u] = await d.select().from(users).where(eq(users.email, "le@x.com"));
+    expect(u.failedLogins).toBe(0);
+  });
+
+  it("login writes an access log with the ip", async () => {
+    const id = await newUser("al@x.com");
+    const r = await login("al@x.com", PASS, "200.1.2.3");
+    await login("al@x.com", "errada", "200.1.2.4");
+    await login("fantasma@x.com", PASS, "200.1.2.5");
+    const rows = await d.select().from(accessLogs).orderBy(accessLogs.ip);
+    expect(rows.map(({ userId, ip, event }) => ({ userId, ip, event }))).toEqual([
+      { userId: id, ip: "200.1.2.3", event: "login" },
+      { userId: id, ip: "200.1.2.4", event: "login_failed" },
+      { userId: null, ip: "200.1.2.5", event: "login_failed" },
+    ]);
+    expect(rows.every((row) => row.createdAt instanceof Date)).toBe(true);
+    if (r.ok) await logout(r.token);
+    expect(await d.select().from(accessLogs)).toHaveLength(3); // logout não apaga registro
   });
 
   it("4 wrong then right resets the counter", async () => {
@@ -233,6 +282,21 @@ describe("totp", () => {
     expect((await resolveSession(other))?.session.mfaPassed).toBe(false); // só a sessão atual
     expect((await resolveSession(stranger))?.session.mfaPassed).toBe(false);
   });
+
+  it("2FA attempt limit counts only failed codes", async () => {
+    // 10 erradas esgotam o limite: o código certo depois disso é recusado.
+    const bad = await newUser("bf@x.com", { totp: true });
+    expect(await Promise.all([-1, 0, 1].map(codeAt))).not.toContain("000000"); // pré-condição
+    for (let i = 0; i < 10; i++) expect(await verifyUserTotp(bad, "000000")).toBe(false);
+    expect(await verifyUserTotp(bad, await codeAt(0))).toBe(false);
+
+    // 11 códigos certos em 11 passos seguidos (mesma janela do limite): todos valem.
+    const good = await newUser("ok@x.com", { totp: true });
+    for (let i = 0; i < 11; i++) {
+      vi.setSystemTime((NOW + i * 30) * 1000);
+      expect(await verifyUserTotp(good, await codeAt(i))).toBe(true);
+    }
+  });
 });
 
 it("rateLimit blocks 21st call in window", async () => {
@@ -252,7 +316,7 @@ it("rateLimit blocks 21st call in window", async () => {
 it("changePassword rejects wrong current", async () => {
   const id = await newUser("p@x.com", { mustChange: true });
   const before = (await d.select().from(users).where(eq(users.id, id)))[0].passwordHash;
-  const token = await loginToken("p@x.com");
+  const token = await mfaToken("p@x.com");
   expect(await changePassword(id, "errada", "nova-senha-456", token)).toBe(false);
   expect((await d.select().from(users).where(eq(users.id, id)))[0].passwordHash).toBe(before);
 
@@ -265,7 +329,7 @@ it("changePassword rejects wrong current", async () => {
 it("changePassword revokes other sessions", async () => {
   const id = await newUser("v@x.com");
   await newUser("w@x.com");
-  const [t1, keep, t3] = [await loginToken("v@x.com"), await loginToken("v@x.com"), await loginToken("v@x.com")];
+  const [t1, keep, t3] = [await loginToken("v@x.com"), await mfaToken("v@x.com"), await loginToken("v@x.com")];
   const someoneElse = await loginToken("w@x.com");
 
   expect(await changePassword(id, "errada", "nova-senha-456", keep)).toBe(false);
@@ -276,6 +340,21 @@ it("changePassword revokes other sessions", async () => {
   expect(await resolveSession(t1)).toBeNull();
   expect(await resolveSession(t3)).toBeNull();
   expect(await resolveSession(someoneElse)).not.toBeNull(); // só as do próprio usuário
+});
+
+it("changePassword refuses a session without mfa_passed", async () => {
+  const id = await newUser("nm@x.com");
+  await newUser("nm2@x.com");
+  const before = (await d.select().from(users).where(eq(users.id, id)))[0].passwordHash;
+  const noMfa = await loginToken("nm@x.com");
+  const other = await loginToken("nm@x.com");
+  const stranger = await mfaToken("nm2@x.com");
+
+  expect(await changePassword(id, PASS, "nova-senha-456", noMfa)).toBe(false);
+  expect(await changePassword(id, PASS, "nova-senha-456", stranger)).toBe(false); // sessão de outro usuário
+  expect(await changePassword(id, PASS, "nova-senha-456", "token-inventado")).toBe(false);
+  expect((await d.select().from(users).where(eq(users.id, id)))[0].passwordHash).toBe(before);
+  expect(await resolveSession(other)).not.toBeNull(); // nada derrubado
 });
 
 it("merchant suspended after login is rejected on next request", async () => {

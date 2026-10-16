@@ -1,4 +1,4 @@
-import { sql } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { db } from "@/lib/db/client";
 import { rateLimits } from "@/lib/db/schema";
 
@@ -27,4 +27,12 @@ export async function rateLimit(
     });
   const ok = row.count <= limit;
   return { ok, retryAfterSec: ok ? 0 : row.retryAfterSec };
+}
+
+/** Devolve uma chamada já contada (ex.: tentativa que deu certo não gasta o limite). */
+export async function releaseRateLimit(key: string): Promise<void> {
+  await db()
+    .update(rateLimits)
+    .set({ count: sql`greatest(${rateLimits.count} - 1, 0)` })
+    .where(eq(rateLimits.key, key));
 }

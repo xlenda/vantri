@@ -1,10 +1,10 @@
-import { and, eq, gt, isNull, lt, ne, or, sql } from "drizzle-orm";
+import { and, eq, gt, isNull, lt, lte, ne, or, sql } from "drizzle-orm";
 import { hashPassword, verifyPassword } from "@/lib/auth/password";
 import { checkTotpStep, newTotpSecret, totpUri } from "@/lib/auth/totp";
 import { decrypt, encrypt, randomToken, sha256Hex } from "@/lib/crypto";
 import { db } from "@/lib/db/client";
-import { merchants, sessions, users } from "@/lib/db/schema";
-import { rateLimit } from "@/lib/ratelimit";
+import { accessLogs, merchants, sessions, users } from "@/lib/db/schema";
+import { rateLimit, releaseRateLimit } from "@/lib/ratelimit";
 
 // Lógica testável sem next/headers; os guardas em ./guards.ts só leem o cookie e chamam daqui.
 
@@ -26,9 +26,20 @@ export type LoginResult =
   | { ok: true; token: string; needsTotpSetup: boolean }
   | { ok: false; reason: "invalid" | "locked" | "rate_limited" | "pending" | "suspended" };
 
-export async function login(email: string, password: string, ip: string): Promise<LoginResult> {
-  if (!(await rateLimit(`login:ip:${ip}`, 20, 15 * 60)).ok) return { ok: false, reason: "rate_limited" };
+type FailReason = Extract<LoginResult, { ok: false }>["reason"];
 
+export async function login(email: string, password: string, ip: string): Promise<LoginResult> {
+  // Barrado pelo limite de IP não grava registro: sob ataque seria uma linha por requisição.
+  if (!(await rateLimit(`login:ip:${ip}`, 20, 15 * 60)).ok) return { ok: false, reason: "rate_limited" };
+  const { result, userId } = await attemptLogin(email, password);
+  await db().insert(accessLogs).values({ userId, ip, event: result.ok ? "login" : "login_failed" });
+  return result;
+}
+
+async function attemptLogin(
+  email: string,
+  password: string,
+): Promise<{ result: LoginResult; userId: string | null }> {
   const [row] = await db()
     .select({ user: users, merchantStatus: merchants.status })
     .from(users)
@@ -36,38 +47,48 @@ export async function login(email: string, password: string, ip: string): Promis
     .where(eq(users.email, email.trim().toLowerCase()));
   if (!row) {
     await verifyPassword(await (dummyHash ??= hashPassword(randomToken())), password);
-    return { ok: false, reason: "invalid" };
+    return { result: { ok: false, reason: "invalid" }, userId: null };
   }
   const { user, merchantStatus } = row;
-  if (user.lockedUntil && user.lockedUntil > new Date()) return { ok: false, reason: "locked" };
+  const fail = (reason: FailReason) => ({ result: { ok: false as const, reason }, userId: user.id });
+
+  // Reserva a tentativa ANTES do argon2, num UPDATE condicional com a hora do banco: sob
+  // concorrência no máximo MAX_FAILED_LOGINS passam; as demais já saem como bloqueadas.
+  const [attempt] = await db()
+    .update(users)
+    .set({ failedLogins: sql`${users.failedLogins} + 1` })
+    .where(
+      and(
+        eq(users.id, user.id),
+        lt(users.failedLogins, MAX_FAILED_LOGINS),
+        or(isNull(users.lockedUntil), lte(users.lockedUntil, sql`now()`)),
+      ),
+    )
+    .returning({ failedLogins: users.failedLogins });
+  if (!attempt) return fail("locked");
 
   if (!(await verifyPassword(user.passwordHash, password))) {
-    // Atômico: o SET lê a linha antiga, então tentativas simultâneas não se perdem.
-    const reachesMax = sql`${users.failedLogins} + 1 >= ${MAX_FAILED_LOGINS}`;
-    await db()
-      .update(users)
-      .set({
-        failedLogins: sql`CASE WHEN ${reachesMax} THEN 0 ELSE ${users.failedLogins} + 1 END`,
-        lockedUntil: sql`CASE WHEN ${reachesMax} THEN now() + interval '15 minutes' ELSE ${users.lockedUntil} END`,
-      })
-      .where(eq(users.id, user.id));
-    return { ok: false, reason: "invalid" };
+    if (attempt.failedLogins >= MAX_FAILED_LOGINS) {
+      await db()
+        .update(users)
+        .set({ failedLogins: 0, lockedUntil: sql`now() + interval '15 minutes'` })
+        .where(eq(users.id, user.id));
+    }
+    return fail("invalid");
   }
-  if (user.failedLogins > 0 || user.lockedUntil) {
-    await db().update(users).set({ failedLogins: 0, lockedUntil: null }).where(eq(users.id, user.id));
-  }
+  await db().update(users).set({ failedLogins: 0 }).where(eq(users.id, user.id));
 
   // Situação do lojista só é revelada a quem acertou a senha.
   if (user.role === "merchant") {
-    if (merchantStatus === "suspended") return { ok: false, reason: "suspended" };
-    if (merchantStatus !== "active") return { ok: false, reason: "pending" };
+    if (merchantStatus === "suspended") return fail("suspended");
+    if (merchantStatus !== "active") return fail("pending");
   }
 
   const token = randomToken(32);
   await db()
     .insert(sessions)
     .values({ id: sha256Hex(token), userId: user.id, expiresAt: new Date(Date.now() + cookieOptions.maxAge * 1000) });
-  return { ok: true, token, needsTotpSetup: !user.totpEnabled };
+  return { result: { ok: true, token, needsTotpSetup: !user.totpEnabled }, userId: user.id };
 }
 
 /** Sessão válida pelo token do cookie. Nunca devolve hash de senha nem segredo TOTP. */
@@ -98,8 +119,16 @@ export type SessionInfo = NonNullable<Awaited<ReturnType<typeof resolveSession>>
  * `enabled` escolhe entre 2FA ativo (login, saque) e segredo recém-gerado (confirmação).
  */
 async function consumeTotp(userId: string, code: string, enabled: boolean): Promise<boolean> {
-  // Força bruta de 6 dígitos: limite por usuário, além do de IP no login.
-  if (!(await rateLimit(`totp:${userId}`, 10, 15 * 60)).ok) return false;
+  // Força bruta de 6 dígitos: cada tentativa reserva uma vaga do limite por usuário ANTES de
+  // conferir (atômico sob concorrência); código aceito devolve a vaga, então só erro gasta o limite.
+  const limitKey = `totp:${userId}`;
+  if (!(await rateLimit(limitKey, 10, 15 * 60)).ok) return false;
+  const ok = await matchTotp(userId, code, enabled);
+  if (ok) await releaseRateLimit(limitKey);
+  return ok;
+}
+
+async function matchTotp(userId: string, code: string, enabled: boolean): Promise<boolean> {
   const [u] = await db()
     .select({ secretEnc: users.totpSecretEnc })
     .from(users)
@@ -113,6 +142,7 @@ async function consumeTotp(userId: string, code: string, enabled: boolean): Prom
     .where(
       and(
         eq(users.id, userId),
+        eq(users.totpEnabled, enabled), // nada de religar por verificação concorrente
         eq(users.totpSecretEnc, u.secretEnc), // segredo não trocado no meio
         or(isNull(users.totpLastStep), lt(users.totpLastStep, step)),
       ),
@@ -153,19 +183,24 @@ export async function confirmTotpSetup(userId: string, code: string, token: stri
   return true;
 }
 
-/** Troca a senha e derruba as outras sessões do usuário; a de `keepToken` continua. */
+/**
+ * Troca a senha e derruba as outras sessões do usuário. `keepToken` tem de ser uma sessão
+ * do próprio usuário que já passou pelo 2FA; senão nada muda.
+ */
 export async function changePassword(
   userId: string,
   current: string,
   next: string,
   keepToken: string,
 ): Promise<boolean> {
+  const s = await resolveSession(keepToken);
+  if (s?.user.id !== userId || !s.session.mfaPassed) return false;
   const [u] = await db().select({ hash: users.passwordHash }).from(users).where(eq(users.id, userId));
   if (!u || !(await verifyPassword(u.hash, current))) return false;
   const passwordHash = await hashPassword(next);
   await db().transaction(async (tx) => {
     await tx.update(users).set({ passwordHash, mustChangePassword: false }).where(eq(users.id, userId));
-    await tx.delete(sessions).where(and(eq(sessions.userId, userId), ne(sessions.id, sha256Hex(keepToken))));
+    await tx.delete(sessions).where(and(eq(sessions.userId, userId), ne(sessions.id, s.session.id)));
   });
   return true;
 }
