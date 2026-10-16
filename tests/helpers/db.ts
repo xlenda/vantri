@@ -8,8 +8,10 @@ import * as schema from "@/lib/db/schema";
 
 const migrationsFolder = fileURLToPath(new URL("../../drizzle", import.meta.url));
 
-export async function createTestDb(): Promise<Db> {
-  const d = drizzle(new PGlite(), { schema });
+/** `logger` recebe o SQL de cada query (inclusive as das migrations). */
+export async function createTestDb(opts: { logger?: (q: string) => void } = {}): Promise<Db> {
+  const { logger } = opts;
+  const d = drizzle(new PGlite(), { schema, logger: logger && { logQuery: (q) => logger(q) } });
   // Sem journal ainda não há migration (a Task 2 gera a primeira).
   if (existsSync(`${migrationsFolder}/meta/_journal.json`)) await migrate(d, { migrationsFolder });
   return d;
