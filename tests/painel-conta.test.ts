@@ -1,0 +1,222 @@
+import { randomBytes } from "node:crypto";
+import { eq } from "drizzle-orm";
+import { generate } from "otplib";
+import { renderToStaticMarkup } from "react-dom/server";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { reconfigureTotpAction, revokeOthersAction, revokeSessionAction } from "@/app/painel/conta/actions";
+import ContaPage from "@/app/painel/conta/page";
+import { hashPassword } from "@/lib/auth/password";
+import { beginTotpSetup, confirmTotpSetup, resolveSession, verifyUserTotp } from "@/lib/auth/session";
+import { encrypt, sha256Hex } from "@/lib/crypto";
+import { type Db, setDb } from "@/lib/db/client";
+import { merchants, sessions, users } from "@/lib/db/schema";
+import { createTestDb } from "./helpers/db";
+import { newMerchant } from "./helpers/factories";
+
+// Guarda de verdade (requireUser → checkAccess no banco) e 2FA de verdade; só o cookie da requisição é simulado.
+// redirect/notFound lançam como os reais.
+const jar = vi.hoisted(() => ({ token: undefined as string | undefined }));
+vi.mock("next/headers", () => ({
+  cookies: async () => ({
+    get: (name: string) => (name === "vantri_session" && jar.token ? { name, value: jar.token } : undefined),
+  }),
+}));
+vi.mock("next/navigation", () => ({
+  redirect: (to: string) => {
+    throw new Error(`NEXT_REDIRECT ${to}`);
+  },
+  notFound: () => {
+    throw new Error("NEXT_NOT_FOUND");
+  },
+}));
+vi.mock("next/cache", () => ({ revalidatePath: vi.fn() }));
+
+const PASS = "senha-atual-da-loja";
+const TOTP_SECRET = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP";
+// Relógio fixo no meio do passo de 30 s de agora: códigos determinísticos (só o Date é falso). Perto da hora real,
+// o timer interno do PGlite não estoura (TimeoutOverflowWarning com o Date meses à frente).
+const NOW = Math.floor(Date.now() / 30_000) * 30 + 15;
+const codeAt = (stepsFromNow: number, secret = TOTP_SECRET) => generate({ secret, epoch: NOW + stepsFromNow * 30 });
+const WRONG_CODE = "Código de verificação inválido ou já usado. Espere o próximo código no app e tente de novo.";
+const CURRENT = "tok-atual";
+
+let d: Db;
+let userId: string;
+let passwordHash: string;
+
+beforeAll(async () => {
+  process.env.APP_ENCRYPTION_KEY = randomBytes(32).toString("base64");
+  passwordHash = await hashPassword(PASS); // argon2 uma vez só
+});
+
+/** Sessão do usuário a partir de um token; devolve o id (sha256 do token). */
+async function newSession(uid: string, token: string, mfaPassed = true): Promise<string> {
+  await d.insert(sessions).values({ id: sha256Hex(token), userId: uid, mfaPassed, expiresAt: new Date(Date.now() + 12 * 3_600_000) });
+  return sha256Hex(token);
+}
+
+async function newUser(n: number): Promise<string> {
+  const merchantId = await newMerchant(d, n);
+  await d
+    .update(merchants)
+    .set({ status: "active", documentEnc: encrypt("12345678000195") })
+    .where(eq(merchants.id, merchantId));
+  const [u] = await d
+    .insert(users)
+    .values({
+      email: `loja${n}@exemplo.com`,
+      passwordHash,
+      role: "merchant",
+      merchantId,
+      totpSecretEnc: encrypt(TOTP_SECRET),
+      totpEnabled: true,
+    })
+    .returning({ id: users.id });
+  return u.id;
+}
+
+beforeEach(async () => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(NOW * 1000);
+  d = await createTestDb();
+  setDb(d);
+  userId = await newUser(1);
+  await newSession(userId, CURRENT);
+  jar.token = CURRENT;
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+const form = (o: Record<string, string>) => {
+  const fd = new FormData();
+  for (const [k, v] of Object.entries(o)) fd.append(k, v);
+  return fd;
+};
+const me = async () => (await d.select().from(users).where(eq(users.id, userId)))[0];
+const sessionIds = async () => (await d.select({ id: sessions.id }).from(sessions)).map((s) => s.id).sort();
+
+describe("reconfigurar 2FA (reconfigureTotpAction)", () => {
+  it("sem senha ou sem código: recusado antes do 2FA, sem gastar o código", async () => {
+    const code = await codeAt(0);
+    expect(await reconfigureTotpAction(undefined, form({ code }))).toEqual({ error: "Digite a sua senha atual." });
+    expect(await reconfigureTotpAction(undefined, form({ password: PASS }))).toEqual({
+      error: "Digite o código de 6 dígitos do app autenticador.",
+    });
+    expect(await me()).toMatchObject({ totpEnabled: true, totpLastStep: null });
+    expect(await verifyUserTotp(userId, code)).toBe(true); // o código continuou valendo
+  });
+
+  it("código já aceito em outra porta é recusado; senha errada gasta o código; nada muda sem os dois", async () => {
+    const before = await me();
+    const outra = await newSession(userId, "tok-celular");
+    // Mesmo passo de 30 s: o código que valeu no saque/chave de API não vale para reconfigurar.
+    const code = await codeAt(0);
+    expect(await verifyUserTotp(userId, code)).toBe(true);
+    expect(await reconfigureTotpAction(undefined, form({ password: PASS, code }))).toEqual({ error: WRONG_CODE });
+
+    const next = await codeAt(1);
+    expect(await reconfigureTotpAction(undefined, form({ password: "senha-errada-123", code: next }))).toEqual({
+      error: "Senha atual incorreta. Espere o próximo código no app e tente de novo.",
+    });
+    expect(await verifyUserTotp(userId, next)).toBe(false); // gasto aqui, recusado em qualquer outra porta
+
+    expect(await me()).toMatchObject({ totpEnabled: true, totpSecretEnc: before.totpSecretEnc });
+    await expect(beginTotpSetup(userId)).rejects.toThrow(/2FA/); // segredo novo continua trancado
+    expect(await sessionIds()).toContain(outra);
+  });
+
+  it("senha e código atuais: desliga o 2FA, encerra as outras sessões e o /conta/2fa religa com o QR novo", async () => {
+    const outra = await newSession(userId, "tok-celular");
+    const alheio = await newUser(2);
+    const sessaoAlheia = await newSession(alheio, "tok-de-outra-loja");
+
+    await expect(reconfigureTotpAction(undefined, form({ password: PASS, code: await codeAt(0) }))).rejects.toThrow(
+      /^NEXT_REDIRECT \/conta\/2fa$/,
+    );
+    expect(await me()).toMatchObject({ totpEnabled: false, totpSecretEnc: null, totpLastStep: null });
+    expect(await sessionIds()).toEqual([sha256Hex(CURRENT), sessaoAlheia].sort());
+    expect(await sessionIds()).not.toContain(outra);
+    expect((await resolveSession(CURRENT))?.session.mfaPassed).toBe(true);
+
+    // O que o /conta/2fa faz: segredo novo + confirmação com um código dele (pode ser no mesmo passo de 30 s).
+    const { secret } = await beginTotpSetup(userId);
+    expect(await confirmTotpSetup(userId, await codeAt(0, secret), CURRENT)).toBe(true);
+    expect((await me()).totpEnabled).toBe(true);
+    expect(await verifyUserTotp(userId, await codeAt(1))).toBe(false); // o app antigo não vale mais
+  });
+
+  it("sem sessão nada muda", async () => {
+    jar.token = undefined;
+    await expect(reconfigureTotpAction(undefined, form({ password: PASS, code: await codeAt(0) }))).rejects.toThrow(
+      "NEXT_REDIRECT /entrar",
+    );
+    expect((await me()).totpEnabled).toBe(true);
+  });
+});
+
+describe("sessões abertas", () => {
+  it("Encerrar: só sessão própria; id de outro usuário ou malformado não apaga nada", async () => {
+    const minhaOutra = await newSession(userId, "tok-notebook");
+    const sessaoAlheia = await newSession(await newUser(2), "tok-de-outra-loja");
+
+    for (const id of [sessaoAlheia, "nao-e-sessao", sessaoAlheia.toUpperCase()]) {
+      await expect(revokeSessionAction(form({ id }))).rejects.toThrow("NEXT_REDIRECT /painel/conta?erro=encerrar");
+    }
+    expect(await sessionIds()).toEqual([sha256Hex(CURRENT), minhaOutra, sessaoAlheia].sort());
+
+    await expect(revokeSessionAction(form({ id: minhaOutra }))).rejects.toThrow("NEXT_REDIRECT /painel/conta?ok=encerrada");
+    expect(await sessionIds()).toEqual([sha256Hex(CURRENT), sessaoAlheia].sort());
+  });
+
+  it("Encerrar as outras: fica só a atual (as de outros usuários continuam)", async () => {
+    await newSession(userId, "tok-notebook");
+    await newSession(userId, "tok-celular", false);
+    const sessaoAlheia = await newSession(await newUser(2), "tok-de-outra-loja");
+    await expect(revokeOthersAction()).rejects.toThrow("NEXT_REDIRECT /painel/conta?ok=outras");
+    expect(await sessionIds()).toEqual([sha256Hex(CURRENT), sessaoAlheia].sort());
+  });
+
+  it("sem sessão nada é encerrado", async () => {
+    const minhaOutra = await newSession(userId, "tok-notebook");
+    jar.token = undefined;
+    await expect(revokeSessionAction(form({ id: minhaOutra }))).rejects.toThrow("NEXT_REDIRECT /entrar");
+    await expect(revokeOthersAction()).rejects.toThrow("NEXT_REDIRECT /entrar");
+    expect(await sessionIds()).toContain(minhaOutra);
+  });
+});
+
+describe("página Minha conta", () => {
+  const page = async (sp: Record<string, string> = {}) =>
+    renderToStaticMarkup(await ContaPage({ searchParams: Promise.resolve(sp) }));
+
+  it("documento mascarado, parceiro, links e sessões sem token; Encerrar só nas outras", async () => {
+    const notebook = await newSession(userId, "tok-notebook", false);
+    const html = await page();
+
+    expect(html).toContain("12.345.678/****-**");
+    expect(html).not.toContain("12345678000195");
+    expect(html).not.toContain("0001-95");
+    expect(html).toContain("Loja 1 LTDA");
+    expect(html).toContain("loja1@exemplo.com");
+    expect(html).toContain("Banco Central do Brasil"); // aviso RC 16: quem opera as contas
+    expect(html).toContain("requer parceiro de Pix"); // agência/conta: plano 2
+    expect(html).toContain('href="/conta/senha"');
+
+    expect(html).toContain("Esta sessão");
+    expect(html).toContain("Não passou do 2FA"); // entrou com a senha e parou no código
+    expect(html).toContain(`value="${notebook}"`); // botão Encerrar da outra sessão
+    expect(html).not.toContain(`value="${sha256Hex(CURRENT)}"`); // a atual não tem Encerrar
+    expect(html).toContain("Encerrar as outras");
+    expect(html).not.toContain(CURRENT);
+    expect(html).not.toContain("tok-notebook");
+  });
+
+  it("aviso do resultado vem da URL; chave desconhecida não vira aviso", async () => {
+    expect(await page({ ok: "outras" })).toContain("Outras sessões encerradas.");
+    expect(await page({ erro: "encerrar" })).toContain("Não foi possível encerrar a sessão.");
+    expect(await page({ ok: "toString" })).not.toMatch(/role="(status|alert)"/);
+    expect(await page()).not.toContain("Encerrar as outras"); // só a atual aberta
+  });
+});
