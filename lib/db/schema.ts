@@ -76,8 +76,8 @@ export const sessions = pgTable("sessions", {
   createdAt: createdAt(),
 });
 
-// Marco Civil da Internet, art. 15: registros de acesso (IP + data/hora) guardados por 6 meses.
-// Logout não apaga; a limpeza depois de 6 meses é do cron.
+// Marco Civil da Internet, art. 15: registros de acesso (IP + data/hora) guardados por no mínimo 6 meses.
+// Nada apaga por enquanto, nem o logout nem o cron (Ruling 30): o prazo de retenção é decisão do advogado.
 export const accessLogs = pgTable("access_logs", {
   id: id(),
   userId: uuid("user_id").references(() => users.id, { onDelete: "set null" }),
