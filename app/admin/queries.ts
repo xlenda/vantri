@@ -1,18 +1,18 @@
-import { and, count, desc, eq, gte, inArray, lt, sql } from "drizzle-orm";
+import { and, count, desc, eq, gt, gte, inArray, lt, lte, max, ne, type SQL, sql } from "drizzle-orm";
+import type { AnyPgColumn } from "drizzle-orm/pg-core";
 import { z } from "zod";
 import { db } from "@/lib/db/client";
-import { charges, medCases, merchants, payouts } from "@/lib/db/schema";
+import { charges, cronRuns, ledgerEntries, medCases, merchants, payouts, webhookDeliveries } from "@/lib/db/schema";
 import { chargeAsOf, chargeStatusWhere } from "@/lib/services/charges";
 import type { PayoutRow } from "@/lib/services/payouts";
-import { DAY_MS, dayStart, todayStart } from "./format";
+import { DAY_MS, dayStart, todayDate, todayStart } from "./format";
 
 // Leituras do admin (todos os lojistas). Quem chama já passou por requireUser({ role: "admin" }).
 
 export const PAGE_SIZE = 25;
 
 // SUM(int) é bigint: postgres-js devolve string, por isso mapWith(Number).
-const total = (col: typeof charges.amountCents | typeof payouts.amountCents) =>
-  sql`coalesce(sum(${col}), 0)`.mapWith(Number);
+const total = (col: AnyPgColumn) => sql`coalesce(sum(${col}), 0)`.mapWith(Number);
 
 export async function adminOverview(now = Date.now()) {
   const [[pending], [paid], [processing], [meds]] = await Promise.all([
@@ -72,7 +72,7 @@ export function parseTxFilters(sp: Params): TxFilters {
 }
 
 /** Período em dias de Brasília; `to` inclusivo. */
-function period(col: typeof charges.createdAt | typeof charges.paidAt | typeof payouts.createdAt, f: Common) {
+function period(col: AnyPgColumn, f: { from?: string; to?: string }) {
   return and(
     f.from ? gte(col, new Date(dayStart(f.from))) : undefined,
     f.to ? lt(col, new Date(dayStart(f.to) + DAY_MS)) : undefined,
@@ -158,4 +158,233 @@ export function merchantOptions() {
     .select({ id: merchants.id, tradeName: merchants.tradeName })
     .from(merchants)
     .orderBy(merchants.tradeName);
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Visão do suporte (/admin): todos os lojistas somados. Quem chama já passou por requireAdmin({ perm: "clientes:ler" }).
+// Cortes de dia iguais aos das listas acima (`period`, Brasília UTC−3 fixo). Dinheiro em centavos inteiros.
+// ---------------------------------------------------------------------------------------------------------------
+
+/** Dias de Brasília AAAA-MM-DD, `to` inclusivo. */
+export type Range = { from: string; to: string };
+const PRESETS = ["hoje", "7d", "30d", "mes", "personalizado"] as const;
+export type RangePreset = (typeof PRESETS)[number];
+const MAX_RANGE_DAYS = 366;
+
+/** AAAA-MM-DD + n dias (conta de calendário em UTC: só dias, sem fuso). */
+const addDays = (day: string, n: number) =>
+  new Date(Date.parse(`${day}T00:00:00Z`) + n * DAY_MS).toISOString().slice(0, 10);
+
+/** `?periodo=` hoje | 7d | 30d | mes (até hoje) | personalizado (`de`/`ate`, até 366 dias). Padrão e inválido: 7 dias. */
+export function parseRange(sp: Params, now = Date.now()): Range & { preset: RangePreset } {
+  const to = todayDate(now);
+  const preset = opt(z.enum(PRESETS), first(sp.periodo));
+  if (preset === "personalizado") {
+    const from = opt(z.iso.date(), first(sp.de));
+    const until = opt(z.iso.date(), first(sp.ate));
+    if (from && until && from <= until && until < addDays(from, MAX_RANGE_DAYS)) return { preset, from, to: until };
+  }
+  if (preset === "hoje") return { preset, from: to, to };
+  if (preset === "30d") return { preset, from: addDays(to, -29), to };
+  if (preset === "mes") return { preset, from: `${to.slice(0, 8)}01`, to };
+  return { preset: "7d", from: addDays(to, -6), to };
+}
+
+/** Um ponto por dia do período; dia sem movimento vem zerado. */
+export type DayPoint = {
+  day: string;
+  inCents: number; // cobranças pagas, pelo dia do pagamento (o "Recebido hoje" de adminOverview)
+  feeInCents: number;
+  pixCount: number;
+  outCents: number; // saques pedidos no dia que não falharam (concluídos ou em processamento)
+  feeOutCents: number;
+  payoutCount: number;
+  failedPayoutCount: number;
+  medCents: number; // MEDs abertos no dia
+  chargesCreated: number; // cobranças criadas no dia...
+  chargesCreatedPaid: number; // ...e quantas delas já foram pagas (conversão)
+};
+
+// Dia de Brasília calculado no banco (mesma regra de format.ts e de lib/services/summary.ts), sem depender do fuso
+// da sessão. Só literais no SQL: o GROUP BY repete a expressão do SELECT igualzinha.
+const brDay = (col: AnyPgColumn) =>
+  sql<string>`to_char((${col} at time zone 'UTC') - interval '3 hours', 'YYYY-MM-DD')`;
+const sumIf = (col: AnyPgColumn, cond: SQL) => sql`coalesce(sum(${col}) filter (where ${cond}), 0)`.mapWith(Number);
+const countIf = (cond: SQL) => sql`count(*) filter (where ${cond})`.mapWith(Number);
+// "Paga" como a pessoa vê (regra única de charges.ts); para esse status o filtro sempre existe.
+const paidCharge = () => chargeStatusWhere("paid", new Date())!;
+// Saque que falhou foi estornado: não conta como enviado nem como tarifa.
+const payoutNotFailed = ne(payouts.status, "failed");
+
+// ponytail: charges/payouts só têm índice por lojista, então o período varre a tabela. Índice em paid_at/created_at
+// quando passar de ~100 mil cobranças.
+export async function seriesByDay(r: Range): Promise<DayPoint[]> {
+  const paid = paidCharge();
+  const [byPaid, byCreated, byPayout, byMed] = await Promise.all([
+    db()
+      .select({
+        day: brDay(charges.paidAt),
+        inCents: total(charges.amountCents),
+        feeInCents: total(charges.feeCents),
+        pixCount: count(),
+      })
+      .from(charges)
+      .where(and(paid, period(charges.paidAt, r)))
+      .groupBy(brDay(charges.paidAt)),
+    db()
+      .select({ day: brDay(charges.createdAt), chargesCreated: count(), chargesCreatedPaid: countIf(paid) })
+      .from(charges)
+      .where(period(charges.createdAt, r))
+      .groupBy(brDay(charges.createdAt)),
+    db()
+      .select({
+        day: brDay(payouts.createdAt),
+        outCents: sumIf(payouts.amountCents, payoutNotFailed),
+        feeOutCents: sumIf(payouts.feeCents, payoutNotFailed),
+        payoutCount: countIf(payoutNotFailed),
+        failedPayoutCount: countIf(eq(payouts.status, "failed")),
+      })
+      .from(payouts)
+      .where(period(payouts.createdAt, r))
+      .groupBy(brDay(payouts.createdAt)),
+    db()
+      .select({ day: brDay(medCases.createdAt), medCents: total(medCases.amountCents) })
+      .from(medCases)
+      .where(period(medCases.createdAt, r))
+      .groupBy(brDay(medCases.createdAt)),
+  ]);
+  const days = new Map<string, DayPoint>();
+  for (let day = r.from; day <= r.to; day = addDays(day, 1)) {
+    days.set(day, {
+      day,
+      inCents: 0,
+      feeInCents: 0,
+      pixCount: 0,
+      outCents: 0,
+      feeOutCents: 0,
+      payoutCount: 0,
+      failedPayoutCount: 0,
+      medCents: 0,
+      chargesCreated: 0,
+      chargesCreatedPaid: 0,
+    });
+  }
+  for (const row of [...byPaid, ...byCreated, ...byPayout, ...byMed]) {
+    const point = days.get(row.day);
+    if (point) Object.assign(point, row);
+  }
+  return [...days.values()];
+}
+
+/**
+ * Lojistas que mais receberam no período (cobranças pagas, pelo dia do pagamento). `feeCents` = tarifa de entrada
+ * + de saída no período (a "receita" dos cartões); `medRate` = MEDs abertos ÷ cobranças pagas no período.
+ */
+export async function topMerchants(
+  r: Range,
+  limit = 10,
+): Promise<
+  Array<{ merchantId: string; tradeName: string; inCents: number; count: number; feeCents: number; medRate: number }>
+> {
+  const inCents = total(charges.amountCents);
+  const top = await db()
+    .select({
+      merchantId: charges.merchantId,
+      tradeName: merchants.tradeName,
+      inCents,
+      count: count(),
+      feeInCents: total(charges.feeCents),
+    })
+    .from(charges)
+    .innerJoin(merchants, eq(merchants.id, charges.merchantId))
+    .where(and(paidCharge(), period(charges.paidAt, r)))
+    .groupBy(charges.merchantId, merchants.tradeName)
+    .orderBy(desc(inCents), merchants.tradeName, charges.merchantId)
+    .limit(limit);
+  if (top.length === 0) return [];
+  const ids = top.map((t) => t.merchantId);
+  const [feesOut, meds] = await Promise.all([
+    db()
+      .select({ merchantId: payouts.merchantId, cents: total(payouts.feeCents) })
+      .from(payouts)
+      .where(and(inArray(payouts.merchantId, ids), payoutNotFailed, period(payouts.createdAt, r)))
+      .groupBy(payouts.merchantId),
+    db()
+      .select({ merchantId: medCases.merchantId, n: count() })
+      .from(medCases)
+      .where(and(inArray(medCases.merchantId, ids), period(medCases.createdAt, r)))
+      .groupBy(medCases.merchantId),
+  ]);
+  const feeOut = new Map(feesOut.map((x) => [x.merchantId, x.cents]));
+  const medCount = new Map(meds.map((x) => [x.merchantId, x.n]));
+  return top.map(({ feeInCents, ...t }) => ({
+    ...t,
+    feeCents: feeInCents + (feeOut.get(t.merchantId) ?? 0),
+    medRate: (medCount.get(t.merchantId) ?? 0) / t.count,
+  }));
+}
+
+/**
+ * Saldos somados de todos os lojistas: a mesma soma por bucket de getBalance (lib/money/ledger.ts), agrupada por
+ * lojista, e quantos lojistas estão com o disponível negativo (ex.: MED aberto depois de um saque).
+ * ponytail: soma o razão inteiro a cada visita; materializar o saldo por lojista se a página pesar.
+ */
+export async function aggregateBalances(): Promise<{ availableTotal: number; blockedTotal: number; negativeCount: number }> {
+  const bucket = (b: "available" | "blocked") =>
+    sql<number>`coalesce(sum(${ledgerEntries.amountCents}) filter (where ${ledgerEntries.bucket} = ${b}), 0)`;
+  const perMerchant = db()
+    .select({ available: bucket("available").as("available"), blocked: bucket("blocked").as("blocked") })
+    .from(ledgerEntries)
+    .groupBy(ledgerEntries.merchantId)
+    .as("per_merchant");
+  const [r] = await db()
+    .select({
+      availableTotal: sql`coalesce(sum(${perMerchant.available}), 0)`.mapWith(Number),
+      blockedTotal: sql`coalesce(sum(${perMerchant.blocked}), 0)`.mapWith(Number),
+      negativeCount: sql`count(*) filter (where ${perMerchant.available} < 0)`.mapWith(Number),
+    })
+    .from(perMerchant);
+  return r;
+}
+
+export const STUCK_PAYOUT_MIN = 10; // o "presos" de /admin/saques
+export const MED_DUE_SOON_H = 48; // o "MED com prazo curto" do Início do painel
+export const CRON_STALE_MIN = 5; // o "parado" da Saúde
+
+/** O que pede ação agora (não depende do período). Cada número leva à tela que resolve. */
+export async function pendingQueue(now = Date.now()): Promise<{
+  pendingMerchants: number;
+  stuckPayouts: number;
+  failingWebhooks: number;
+  medDueSoon: number;
+  cronStale: boolean;
+}> {
+  const ago = (min: number) => new Date(now - min * 60_000);
+  const [[pending], [stuck], [failing], [dueSoon], [cron]] = await Promise.all([
+    db().select({ n: count() }).from(merchants).where(eq(merchants.status, "pending")),
+    db()
+      .select({ n: count() })
+      .from(payouts)
+      .where(and(eq(payouts.status, "processing"), lt(payouts.createdAt, ago(STUCK_PAYOUT_MIN)))),
+    db().select({ n: count() }).from(webhookDeliveries).where(eq(webhookDeliveries.status, "failed")),
+    // Só os que ainda aceitam defesa (abertos, prazo não vencido) e vencem logo.
+    db()
+      .select({ n: count() })
+      .from(medCases)
+      .where(
+        and(
+          eq(medCases.status, "open"),
+          gt(medCases.defenseDeadline, new Date(now)),
+          lte(medCases.defenseDeadline, new Date(now + MED_DUE_SOON_H * 3_600_000)),
+        ),
+      ),
+    db().select({ last: max(cronRuns.startedAt) }).from(cronRuns),
+  ]);
+  return {
+    pendingMerchants: pending.n,
+    stuckPayouts: stuck.n,
+    failingWebhooks: failing.n,
+    medDueSoon: dueSoon.n,
+    cronStale: !cron.last || cron.last.getTime() < ago(CRON_STALE_MIN).getTime(),
+  };
 }

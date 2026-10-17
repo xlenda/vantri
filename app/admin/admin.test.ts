@@ -1,12 +1,23 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { verifyPassword } from "@/lib/auth/password";
+import type { Perm } from "@/lib/auth/perms";
 import { brl } from "@/lib/br/money";
 import { type Db, setDb } from "@/lib/db/client";
-import { charges, medCases, medFiles, merchants, payouts, users } from "@/lib/db/schema";
-import { getBalance } from "@/lib/money/ledger";
+import {
+  charges,
+  cronRuns,
+  medCases,
+  medFiles,
+  merchants,
+  payouts,
+  users,
+  webhookDeliveries,
+  webhookEndpoints,
+} from "@/lib/db/schema";
+import { getBalance, postEntries } from "@/lib/money/ledger";
 import { simulator } from "@/lib/provider/simulator";
 import { signupMerchant } from "@/lib/services/merchants";
 import { seedAdmin } from "@/scripts/seed-admin";
@@ -20,23 +31,38 @@ import { parsePercent, percent, reais, todayDate, todayStart } from "./format";
 import { GET as downloadFile } from "./med/arquivo/[id]/route";
 import { closeMedAction, openTestMedAction } from "./med/actions";
 import AdminHome from "./page";
-import { adminOverview, listChargesAdmin, listPayoutsAdmin, parseTxFilters } from "./queries";
+import {
+  adminOverview,
+  aggregateBalances,
+  listChargesAdmin,
+  listPayoutsAdmin,
+  parseRange,
+  parseTxFilters,
+  pendingQueue,
+  seriesByDay,
+  topMerchants,
+} from "./queries";
 
 // Guarda de verdade testado em tests/auth.test.ts; aqui só "logado como admin" ou "não logado" (redirect lança).
 const auth = vi.hoisted(
   () => ({ user: null as null | { id: string; role: "admin"; adminRole?: "admin" | "operador" | "suporte" | null; email?: string } }),
 );
-vi.mock("@/lib/auth/guards", () => ({
-  requireUser: vi.fn(async (opts: { role: string }) => {
+vi.mock("@/lib/auth/guards", async () => {
+  const { pode } = await import("@/lib/auth/perms");
+  const requireUser = vi.fn(async (opts: { role: string }) => {
     if (!auth.user || opts.role !== "admin") throw new Error("NEXT_REDIRECT");
     return { user: auth.user };
-  }),
-  // A permissão do papel é testada com o guarda de verdade em tests/perms.test.ts e tests/med-queue.test.ts.
-  requireAdmin: vi.fn(async () => {
-    if (!auth.user) throw new Error("NEXT_REDIRECT");
-    return { user: auth.user };
-  }),
-}));
+  });
+  return {
+    requireUser,
+    // Mesma regra do requireAdmin real: sessão de admin + permissão do papel; sem ela, notFound().
+    requireAdmin: vi.fn(async (opts: { perm: Perm }) => {
+      const { user } = await requireUser({ role: "admin" });
+      if (!pode(user.adminRole ?? null, opts.perm)) throw new Error("NEXT_NOT_FOUND");
+      return { user };
+    }),
+  };
+});
 vi.mock("next/cache", () => ({ revalidatePath: vi.fn() }));
 // BrasilAPI de mentira: por padrão fora do ar (cada teste escolhe a resposta).
 const receita = vi.hoisted(() => ({ lookup: vi.fn() }));
@@ -59,7 +85,7 @@ beforeEach(async () => {
     .insert(users)
     .values({ email: "admin@vantri.test", passwordHash: "x", role: "admin" })
     .returning({ id: users.id });
-  auth.user = { id: u.id, role: "admin" };
+  auth.user = { id: u.id, role: "admin", adminRole: "admin" };
 });
 
 afterEach(() => {
@@ -114,6 +140,8 @@ async function payout(merchantId: string, o: Partial<typeof payouts.$inferInsert
     ...o,
   });
 }
+
+const home = (sp: Record<string, string> = {}) => AdminHome({ searchParams: Promise.resolve(sp) });
 
 async function medCase(merchantId: string, chargeId: string, status: (typeof medCases.$inferSelect)["status"] = "open") {
   const [c] = await d
@@ -215,11 +243,11 @@ describe("início", () => {
     const card = "Proteção contra robôs (Turnstile) desligada — configure as duas chaves";
     vi.stubEnv("NEXT_PUBLIC_TURNSTILE_SITE_KEY", "chave-publica");
     vi.stubEnv("TURNSTILE_SECRET_KEY", "");
-    expect(renderToStaticMarkup(await AdminHome())).not.toContain(card); // fora de produção
+    expect(renderToStaticMarkup(await home())).not.toContain(card); // fora de produção
     vi.stubEnv("VERCEL_ENV", "production");
-    expect(renderToStaticMarkup(await AdminHome())).toContain(card);
+    expect(renderToStaticMarkup(await home())).toContain(card);
     vi.stubEnv("TURNSTILE_SECRET_KEY", "segredo");
-    expect(renderToStaticMarkup(await AdminHome())).not.toContain(card);
+    expect(renderToStaticMarkup(await home())).not.toContain(card);
   });
 
   it("banco vazio dá zeros", async () => {
@@ -229,6 +257,259 @@ describe("início", () => {
       processingPayouts: { count: 0, cents: 0 },
       openMeds: 0,
     });
+  });
+});
+
+describe("visão do suporte", () => {
+  const at = (s: string) => new Date(`${s}-03:00`); // horário de Brasília
+  const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  /** Cartão do período: <dt>rótulo</dt><dd …>valor</dd>. */
+  const kpi = (label: string, value: string) => new RegExp(`>${esc(label)}</dt><dd[^>]*>${esc(value)}</dd>`);
+  const med = (merchantId: string, chargeId: string, o: Partial<typeof medCases.$inferInsert> = {}) =>
+    d.insert(medCases).values({
+      merchantId,
+      chargeId,
+      providerCaseId: `sim_med_${++seq}`,
+      amountCents: 5000,
+      reason: "teste",
+      status: "open",
+      defenseDeadline: new Date(Date.now() + 86_400_000),
+      ...o,
+    });
+
+  it("período: atalhos em dias de Brasília; personalizado inválido volta para 7 dias", () => {
+    const now = Date.parse("2026-10-18T02:30:00Z"); // 23:30 do dia 17 em Brasília
+    const def = { preset: "7d", from: "2026-10-11", to: "2026-10-17" };
+    expect(parseRange({}, now)).toEqual(def);
+    expect(parseRange({ periodo: "hoje" }, now)).toEqual({ preset: "hoje", from: "2026-10-17", to: "2026-10-17" });
+    expect(parseRange({ periodo: "30d" }, now)).toEqual({ preset: "30d", from: "2026-09-18", to: "2026-10-17" });
+    expect(parseRange({ periodo: "mes" }, now)).toEqual({ preset: "mes", from: "2026-10-01", to: "2026-10-17" });
+    // 366 dias contando as duas pontas: ainda vale
+    expect(parseRange({ periodo: "personalizado", de: "2025-10-17", ate: "2026-10-17" }, now)).toEqual({
+      preset: "personalizado",
+      from: "2025-10-17",
+      to: "2026-10-17",
+    });
+    for (const bad of [
+      { periodo: "personalizado", de: "2025-10-16", ate: "2026-10-17" }, // 367 dias
+      { periodo: "personalizado", de: "2026-10-05", ate: "2026-10-01" }, // início depois do fim
+      { periodo: "personalizado", de: "2026-02-30", ate: "2026-03-01" }, // dia que não existe
+      { periodo: "personalizado", de: "2026-10-01" },
+      { periodo: "ontem" },
+    ]) {
+      expect(parseRange(bad, now)).toEqual(def);
+    }
+  });
+
+  /** Dias 10 a 12/10 em Brasília, com as bordas da meia-noite e o que fica de fora. */
+  const R = { from: "2026-10-10", to: "2026-10-12" };
+  async function seedPeriod() {
+    const a = await merchant();
+    const b = await merchant();
+    const c1 = await charge(a, { amountCents: 10000, feeCents: 149, createdAt: at("2026-10-10T09:00:00"), paidAt: at("2026-10-10T09:05:00") });
+    // 02:00 UTC do dia 11 = 23:00 do dia 10 em Brasília
+    await charge(a, { amountCents: 5000, feeCents: 99, createdAt: at("2026-10-10T22:00:00"), paidAt: new Date("2026-10-11T02:00:00Z") });
+    // criada e não paga (venceu): conta só como criada, na conversão
+    await charge(a, { status: "pending", paidAt: null, createdAt: at("2026-10-10T10:00:00"), expiresAt: at("2026-10-10T11:00:00") });
+    // criada no dia 10, paga à meia-noite em ponto do dia 11
+    await charge(b, { amountCents: 7000, feeCents: 149, createdAt: at("2026-10-10T23:30:00"), paidAt: at("2026-10-11T00:00:00") });
+    await charge(b, { amountCents: 300, feeCents: 10, createdAt: at("2026-10-12T08:00:00"), paidAt: at("2026-10-12T08:01:00") });
+    await charge(b, { amountCents: 200, feeCents: 10, createdAt: at("2026-10-12T09:00:00"), paidAt: at("2026-10-12T09:01:00") });
+    // fora do período: 23:59:59 do dia 9 e o dia 13
+    await charge(b, { amountCents: 999, createdAt: at("2026-10-09T12:00:00"), paidAt: at("2026-10-09T23:59:59") });
+    await charge(b, { amountCents: 888, createdAt: at("2026-10-13T00:00:00"), paidAt: at("2026-10-13T00:00:01") });
+    await payout(a, { amountCents: 3000, feeCents: 100, status: "processing", createdAt: at("2026-10-10T15:00:00") });
+    await payout(b, { amountCents: 2000, feeCents: 100, status: "completed", createdAt: at("2026-10-11T08:00:00") });
+    await payout(a, { amountCents: 1000, feeCents: 100, status: "failed", createdAt: at("2026-10-11T09:00:00") }); // estornado
+    await payout(b, { amountCents: 4444, createdAt: at("2026-10-13T00:00:00") }); // fora
+    await med(a, c1.id, { amountCents: 4000, createdAt: at("2026-10-11T10:00:00") });
+    await med(a, c1.id, { amountCents: 1234, createdAt: at("2026-10-09T10:00:00") }); // fora
+    return { a, b };
+  }
+
+  it("série por dia de Brasília: recebido pelo pagamento, enviado sem os saques que falharam, MED e conversão", async () => {
+    await seedPeriod();
+    const zero = {
+      inCents: 0,
+      feeInCents: 0,
+      pixCount: 0,
+      outCents: 0,
+      feeOutCents: 0,
+      payoutCount: 0,
+      failedPayoutCount: 0,
+      medCents: 0,
+      chargesCreated: 0,
+      chargesCreatedPaid: 0,
+    };
+    expect(await seriesByDay(R)).toEqual([
+      {
+        ...zero,
+        day: "2026-10-10",
+        inCents: 15000,
+        feeInCents: 248,
+        pixCount: 2,
+        outCents: 3000,
+        feeOutCents: 100,
+        payoutCount: 1,
+        chargesCreated: 4,
+        chargesCreatedPaid: 3,
+      },
+      {
+        ...zero,
+        day: "2026-10-11",
+        inCents: 7000,
+        feeInCents: 149,
+        pixCount: 1,
+        outCents: 2000,
+        feeOutCents: 100,
+        payoutCount: 1,
+        failedPayoutCount: 1,
+        medCents: 4000,
+      },
+      { ...zero, day: "2026-10-12", inCents: 500, feeInCents: 20, pixCount: 2, chargesCreated: 2, chargesCreatedPaid: 2 },
+    ]);
+    // Dia sem nada também aparece (o gráfico não pula dias).
+    expect(await seriesByDay({ from: "2026-10-20", to: "2026-10-20" })).toEqual([{ ...zero, day: "2026-10-20" }]);
+  });
+
+  it("maiores lojistas: por valor recebido (não por quantidade), com receita de tarifa e taxa de MED", async () => {
+    const { a, b } = await seedPeriod();
+    const top = await topMerchants(R);
+    expect(top).toEqual([
+      // a: 2 cobranças, 15.000; tarifa 248 de entrada + 100 do saque que não falhou; 1 MED ÷ 2 pagas
+      { merchantId: a, tradeName: expect.any(String), inCents: 15000, count: 2, feeCents: 348, medRate: 0.5 },
+      // b: mais cobranças (3) e menos valor (7.500)
+      { merchantId: b, tradeName: expect.any(String), inCents: 7500, count: 3, feeCents: 269, medRate: 0 },
+    ]);
+    expect((await topMerchants(R, 1)).map((t) => t.merchantId)).toEqual([a]);
+    expect(await topMerchants({ from: "2026-10-20", to: "2026-10-20" })).toEqual([]);
+  });
+
+  it("saldos agregados: soma por bucket (a conta do getBalance) e conta quem ficou com o disponível negativo", async () => {
+    const a = await merchant();
+    const b = await merchant();
+    const c = await merchant();
+    await merchant(); // sem lançamento nenhum
+    const paidB = await charge(b, { amountCents: 10000 });
+    const payoutB = randomUUID();
+    const entry = (merchantId: string, kind: "cash_in" | "fee_in" | "cash_out" | "fee_out", amountCents: number, refId: string) => ({
+      merchantId,
+      kind,
+      amountCents,
+      bucket: "available" as const,
+      refType: kind.endsWith("_in") ? ("charge" as const) : ("payout" as const),
+      refId,
+    });
+    const chargeA = randomUUID();
+    await d.transaction((tx) =>
+      postEntries(tx, [
+        entry(a, "cash_in", 20000, chargeA),
+        entry(a, "fee_in", -298, chargeA),
+        entry(c, "cash_in", 500, randomUUID()),
+        entry(b, "cash_in", 10000, paidB.id),
+        entry(b, "fee_in", -149, paidB.id),
+        entry(b, "cash_out", -9000, payoutB),
+        entry(b, "fee_out", -100, payoutB),
+      ]),
+    );
+    // MED depois do saque: o bloqueio sai de um disponível que já foi sacado.
+    expect(await openTestMedAction(undefined, form({ chargeId: paidB.id, amount: "50,00" }))).toMatchObject({
+      ok: expect.any(String),
+    });
+    const balances = await Promise.all([a, b, c].map((id) => getBalance(id)));
+    expect(balances[1]).toEqual({ available: -4249, blocked: 5000, total: 751 });
+    // Dois positivos e um negativo: só o negativo conta.
+    expect(await aggregateBalances()).toEqual({
+      availableTotal: balances.reduce((s, x) => s + x.available, 0),
+      blockedTotal: balances.reduce((s, x) => s + x.blocked, 0),
+      negativeCount: 1,
+    });
+    expect(balances.reduce((s, x) => s + x.available, 0)).toBe(19702 - 4249 + 500);
+  });
+
+  it("saldos agregados com o razão vazio dão zero", async () => {
+    expect(await aggregateBalances()).toEqual({ availableTotal: 0, blockedTotal: 0, negativeCount: 0 });
+  });
+
+  it("fila de pendências: cadastros, saques presos há mais de 10 min, webhooks que falharam, MED com prazo curto e cron parado", async () => {
+    const now = Date.now();
+    const min = 60_000;
+    const hour = 60 * min;
+    const m = await merchant();
+    await merchant("pending");
+    await merchant("pending");
+    await payout(m, { createdAt: new Date(now - 11 * min) }); // preso
+    await payout(m, { createdAt: new Date(now - 5 * min) }); // ainda dentro do normal
+    await payout(m, { status: "completed", createdAt: new Date(now - hour) });
+    const [ep] = await d
+      .insert(webhookEndpoints)
+      .values({ merchantId: m, url: "https://exemplo.com/webhook", secretEnc: "x", events: ["charge.paid"] })
+      .returning({ id: webhookEndpoints.id });
+    const delivery = (status: "pending" | "delivered" | "failed") => ({
+      endpointId: ep.id,
+      eventId: `ev${++seq}`,
+      eventType: "charge.paid",
+      payload: {},
+      status,
+    });
+    await d.insert(webhookDeliveries).values([delivery("failed"), delivery("failed"), delivery("pending"), delivery("delivered")]);
+    const c = await charge(m);
+    await med(m, c.id, { defenseDeadline: new Date(now + 24 * hour) }); // vence logo
+    await med(m, c.id, { defenseDeadline: new Date(now + 72 * hour) }); // ainda longe
+    await med(m, c.id, { status: "defended", defenseDeadline: new Date(now + 24 * hour) }); // defesa já enviada
+    await med(m, c.id, { defenseDeadline: new Date(now - hour) }); // prazo já passou
+
+    // Sem nenhuma rodada registrada, o cron conta como parado.
+    expect(await pendingQueue(now)).toEqual({
+      pendingMerchants: 2,
+      stuckPayouts: 1,
+      failingWebhooks: 2,
+      medDueSoon: 1,
+      cronStale: true,
+    });
+    await d.insert(cronRuns).values({ step: "webhooks", startedAt: new Date(now - 6 * min) });
+    expect((await pendingQueue(now)).cronStale).toBe(true);
+    await d.insert(cronRuns).values({ step: "webhooks", startedAt: new Date(now - min) });
+    expect((await pendingQueue(now)).cronStale).toBe(false);
+  });
+
+  it("página: gráfico em SVG e os números de hoje batem com o adminOverview", async () => {
+    const now = Date.now();
+    const m = await merchant();
+    await merchant("pending");
+    await charge(m, { amountCents: 10000, paidAt: new Date(now) });
+    await charge(m, { amountCents: 2550, paidAt: new Date(todayStart(now)) });
+    await charge(m, { amountCents: 7000, paidAt: new Date(todayStart(now) - 1) }); // ontem
+    const o = await adminOverview(now);
+    expect(o.paidToday).toEqual({ count: 2, cents: 12550 });
+
+    const html = renderToStaticMarkup(await home({ periodo: "hoje" }));
+    expect(html).toMatch(/<svg[^>]*role="img"[^>]*aria-label="Recebido e enviado por dia\. Total no período: Recebido R\$/);
+    expect(html).toMatch(kpi("Recebido (bruto)", brl(o.paidToday.cents)));
+    expect(html).toMatch(kpi("Cobranças pagas", String(o.paidToday.count)));
+    expect(html).toMatch(new RegExp(`Cadastros pendentes</span><span[^>]*>${o.pendingMerchants}</span>`));
+    // Maiores lojistas: o lojista do dia, com link para a operação dele.
+    expect(html).toContain(`href="/admin/clientes/${m}"`);
+  });
+
+  it("todo papel de admin vê a Visão; o atalho da fila só vira link para a tela que o papel abre; sem papel, 404", async () => {
+    auth.user = { id: "u1", role: "admin", adminRole: "suporte" };
+    const html = renderToStaticMarkup(await home());
+    expect(html).toContain('href="/admin/clientes?status=pending"');
+    expect(html).toContain('href="/admin/med?ordem=prazo"');
+    expect(html).toContain('href="/admin/saude"');
+    // suporte não opera saques nem webhooks: vê o número, sem link para uma tela que daria 404
+    expect(html).toContain("Saques presos");
+    expect(html).not.toContain('href="/admin/saques?presos=1"');
+    expect(html).not.toContain('href="/admin/webhooks?status=failed"');
+
+    auth.user = { id: "u1", role: "admin", adminRole: "operador" };
+    const op = renderToStaticMarkup(await home());
+    expect(op).toContain('href="/admin/saques?presos=1"');
+    expect(op).toContain('href="/admin/webhooks?status=failed"');
+
+    auth.user = { id: "u1", role: "admin", adminRole: null };
+    await expect(home()).rejects.toThrow("NEXT_NOT_FOUND");
   });
 });
 
