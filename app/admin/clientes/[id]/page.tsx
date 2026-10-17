@@ -11,7 +11,7 @@ import { Badge, StatusBadge } from "@/app/components/ui/status-badge";
 import { SubmitButton } from "@/app/components/ui/submit-button";
 import { Table } from "@/app/components/ui/table";
 import { requireUser } from "@/lib/auth/guards";
-import { maskDocument, SEGMENT_LABELS, type Segment } from "@/lib/br/documents";
+import { formatCnpj, maskDocument, SEGMENT_LABELS, type Segment } from "@/lib/br/documents";
 import { brl, dateTime } from "@/lib/br/money";
 import { decrypt } from "@/lib/crypto";
 import { db } from "@/lib/db/client";
@@ -41,14 +41,17 @@ export default async function ClientePage({ params }: { params: Promise<{ id: st
     listPayoutsAdmin({ merchantId: id, page: 1 }, RECENT),
   ]);
 
+  const manualReview = m.needsManualReview && m.status === "pending";
+  // CNPJ completo só em revisão manual (pendente): o admin precisa dele para conferir na Receita. Fora disso, mascarado.
+  const fullCnpj = manualReview && m.documentType === "cnpj";
   let document: string;
   try {
-    document = maskDocument(decrypt(m.documentEnc));
+    const raw = decrypt(m.documentEnc);
+    document = fullCnpj ? formatCnpj(raw) : maskDocument(raw);
   } catch (e) {
     logError("admin: documento do cliente ilegível", e, { merchant: id });
     document = "não foi possível ler";
   }
-  const manualReview = m.needsManualReview && m.status === "pending";
 
   return (
     <>
@@ -68,6 +71,7 @@ export default async function ClientePage({ params }: { params: Promise<{ id: st
             <Row label={m.documentType === "cpf" ? "Nome completo" : "Razão social"}>{m.legalName}</Row>
             <Row label={m.documentType.toUpperCase()}>
               <span className="font-mono">{document}</span>
+              {fullCnpj && <span className="block text-xs text-muted">Completo enquanto o cadastro está em revisão manual.</span>}
             </Row>
             <Row label="Segmento">{SEGMENT_LABELS[m.segment as Segment] ?? m.segment}</Row>
             <Row label="Acesso">{logins.map((u) => u.email).join(", ") || "—"}</Row>
@@ -213,11 +217,12 @@ function StatusActions({
           {manualReview && (
             <>
               <p className="text-sm leading-relaxed text-muted">
-                A Receita não respondeu no cadastro: o CNPJ não foi conferido. Antes de aprovar, confira se está ativo e
-                se nenhum CNAE (principal ou secundário) começa com 9200 (apostas).
+                A Receita não respondeu no cadastro: o CNPJ não foi conferido. Ao aprovar, consultamos de novo e, se a
+                Receita responder, as regras valem na hora (CNPJ ativo, nenhum CNAE de apostas). Se continuar fora do ar,
+                confira o CNPJ completo acima na Receita: ativo e nenhum CNAE (principal ou secundário) começando com 9200.
               </p>
               <label className="flex cursor-pointer items-start gap-3 rounded-2xl border border-line bg-bg/60 p-4 text-sm">
-                <input type="checkbox" name="manualCheck" value="sim" required className="mt-0.5 size-5 shrink-0 accent-brand" />
+                <input type="checkbox" name="manualCheck" value="sim" className="mt-0.5 size-5 shrink-0 accent-brand" />
                 <span className="font-semibold">Conferi o CNPJ e o CNAE manualmente</span>
               </label>
             </>

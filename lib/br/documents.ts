@@ -37,6 +37,13 @@ export function maskDocument(d: string): string {
   return "***";
 }
 
+/** CNPJ completo `12.345.678/0001-95`: só para o admin conferir na Receita um cadastro em revisão manual. */
+export function formatCnpj(d: string): string {
+  const x = normalizeDocument(d);
+  if (x.length !== 14) return maskDocument(x); // nunca mostra outro documento por inteiro
+  return `${x.slice(0, 2)}.${x.slice(2, 5)}.${x.slice(5, 8)}/${x.slice(8, 12)}-${x.slice(12)}`;
+}
+
 // Apostas não existem aqui de propósito (MP 1.394/2026).
 export const SEGMENTS = [
   "cursos",

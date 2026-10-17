@@ -20,6 +20,7 @@ const SIGNUP_ERRORS: Record<MerchantErrorCode, string> = {
   betting_cnae: "Não atendemos apostas nem jogos de azar.",
   cnpj_inactive: "Este CNPJ não está ativo na Receita Federal.",
   cnpj_lookup_unavailable: "Não conseguimos consultar o CNPJ agora. Tente de novo em instantes.",
+  manual_check_required: GENERIC_ERROR,
   document_taken: "Já existe um cadastro com este documento.",
   email_taken: "Já existe um cadastro com este e-mail.",
   not_found: GENERIC_ERROR,

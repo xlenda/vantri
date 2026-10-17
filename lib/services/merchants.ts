@@ -1,7 +1,7 @@
 import { asc, eq } from "drizzle-orm";
 import { z } from "zod";
 import { hashPassword } from "@/lib/auth/password";
-import { lookupCnpj } from "@/lib/br/cnpj-lookup";
+import { type CnpjLookup, lookupCnpj } from "@/lib/br/cnpj-lookup";
 import { isValidCnpj, isValidCpf, normalizeDocument, onlyDigits, SEGMENTS } from "@/lib/br/documents";
 import { decrypt, encrypt, hmacHex, randomBase62 } from "@/lib/crypto";
 import { db, type Tx } from "@/lib/db/client";
@@ -17,6 +17,7 @@ export type MerchantErrorCode =
   | "betting_cnae"
   | "cnpj_inactive"
   | "cnpj_lookup_unavailable"
+  | "manual_check_required"
   | "document_taken"
   | "email_taken"
   | "not_found"
@@ -58,6 +59,14 @@ const parse = <T extends z.ZodType>(schema: T, input: unknown) =>
 
 type MerchantInput = z.output<typeof adminCreateSchema>;
 
+/** Regras da Receita para CNPJ: nenhum CNAE (principal ou secundário) de apostas (9200) e situação ativa. */
+function checkCnpj(r: Extract<CnpjLookup, { ok: true }>): void {
+  if (r.cnaes.some((c) => onlyDigits(c).startsWith("9200"))) {
+    throw new MerchantError("betting_cnae", "Não atendemos apostas.");
+  }
+  if (!r.active) throw new MerchantError("cnpj_inactive", "CNPJ não está ativo na Receita Federal.");
+}
+
 /** Regras de quem pode ser cliente. Devolve o documento normalizado (maiúsculas, sem pontuação). */
 async function vet(data: MerchantInput, lookup: typeof lookupCnpj) {
   if (!(SEGMENTS as readonly string[]).includes(data.segment)) {
@@ -72,10 +81,7 @@ async function vet(data: MerchantInput, lookup: typeof lookupCnpj) {
 
   const r = await lookup(doc);
   if (!r.ok) return { doc, needsManualReview: true }; // BrasilAPI fora do ar: cadastro segue, admin revisa
-  if (r.cnaes.some((c) => onlyDigits(c).startsWith("9200"))) {
-    throw new MerchantError("betting_cnae", "Não atendemos apostas.");
-  }
-  if (!r.active) throw new MerchantError("cnpj_inactive", "CNPJ não está ativo na Receita Federal.");
+  checkCnpj(r);
   return { doc, needsManualReview: false };
 }
 
@@ -192,8 +198,32 @@ async function lockInStatus(tx: Tx, id: string, from: Status) {
   return m;
 }
 
-/** Só a partir de `pending`. Se o provedor falhar, nada muda (continua `pending`). */
-export async function approveMerchant(id: string, actorId: string): Promise<void> {
+/**
+ * Só a partir de `pending`. Se o provedor falhar, nada muda (continua `pending`).
+ * CNPJ em revisão manual (a Receita não respondeu no cadastro) é consultado de novo antes: se a Receita responder,
+ * valem as regras do cadastro (CNAE 9200, CNPJ inativo) e a revisão é limpa; se continuar fora do ar, só aprova
+ * com `manualCheck` (o admin conferiu o CNPJ completo na Receita). O jeito da conferência fica no audit_log.
+ */
+export async function approveMerchant(
+  id: string,
+  actorId: string,
+  opts: { manualCheck?: boolean; lookup?: typeof lookupCnpj } = {},
+): Promise<void> {
+  if (!z.uuid().safeParse(id).success) throw notFound();
+  const [pre] = await db().select().from(merchants).where(eq(merchants.id, id));
+  // Consulta fora da transação: não prende a linha do lojista enquanto a Receita responde.
+  let cnpjCheck: "receita" | "manual" | undefined;
+  if (pre?.status === "pending" && pre.needsManualReview && pre.documentType === "cnpj") {
+    const r = await (opts.lookup ?? lookupCnpj)(decrypt(pre.documentEnc));
+    if (r.ok) {
+      checkCnpj(r);
+      cnpjCheck = "receita";
+    } else if (opts.manualCheck) {
+      cnpjCheck = "manual";
+    } else {
+      throw new MerchantError("manual_check_required", "A Receita não respondeu: confira o CNPJ manualmente para aprovar.");
+    }
+  }
   await db().transaction(async (tx) => {
     const m = await lockInStatus(tx, id, "pending");
     const [u] = await tx
@@ -210,7 +240,8 @@ export async function approveMerchant(id: string, actorId: string): Promise<void
       documentType: m.documentType,
       email: u.email,
     });
-    await audit(tx, actorId, "merchant.approve", { merchantId: id });
+    if (cnpjCheck === "receita") await tx.update(merchants).set({ needsManualReview: false }).where(eq(merchants.id, id));
+    await audit(tx, actorId, "merchant.approve", { merchantId: id, ...(cnpjCheck && { cnpjCheck }) });
   });
 }
 

@@ -26,6 +26,9 @@ vi.mock("@/lib/auth/guards", () => ({
   }),
 }));
 vi.mock("next/cache", () => ({ revalidatePath: vi.fn() }));
+// BrasilAPI de mentira: por padrão fora do ar (cada teste escolhe a resposta).
+const receita = vi.hoisted(() => ({ lookup: vi.fn() }));
+vi.mock("@/lib/br/cnpj-lookup", () => ({ lookupCnpj: receita.lookup }));
 
 let d: Db;
 let seq = 0;
@@ -36,6 +39,7 @@ beforeAll(() => {
 
 beforeEach(async () => {
   vi.stubEnv("PIX_PROVIDER", "simulator");
+  receita.lookup.mockReset().mockResolvedValue({ ok: false });
   d = await createTestDb();
   setDb(d);
   // Direto no banco (sem argon2 a cada teste); o seedAdmin tem os testes dele abaixo.
@@ -352,18 +356,44 @@ describe("ações de clientes", () => {
     expect([m.feeInBps, m.feeInFixedCents, m.feeOutBps, m.feeOutFixedCents]).toEqual([149, 0, 0, 100]);
   });
 
-  it("aprovar cliente em revisão manual exige a confirmação", async () => {
-    const { merchantId } = await signupMerchant(
-      { legalName: "Escola LTDA", tradeName: "Escola", documentType: "cnpj", document: CNPJ, segment: "cursos", email: "e@x.com", password: "senha-bem-longa-123" },
-      { lookup: async () => ({ ok: false }) },
-    );
+  const reviewCnpj = async () =>
+    (
+      await signupMerchant(
+        { legalName: "Escola LTDA", tradeName: "Escola", documentType: "cnpj", document: CNPJ, segment: "cursos", email: "e@x.com", password: "senha-bem-longa-123" },
+        { lookup: async () => ({ ok: false }) },
+      )
+    ).merchantId;
+  const statusOf = async (id: string) => (await d.select().from(merchants).where(eq(merchants.id, id)))[0].status;
+
+  it("aprovar cliente em revisão manual com a Receita ainda fora do ar exige a confirmação", async () => {
+    const merchantId = await reviewCnpj();
     const s1 = await merchantStatusAction(undefined, form({ merchantId, op: "approve" }));
-    expect(s1).toEqual({ error: "Marque “Conferi o CNPJ e o CNAE manualmente” para aprovar." });
-    expect((await d.select().from(merchants).where(eq(merchants.id, merchantId)))[0].status).toBe("pending");
+    expect(s1).toEqual({
+      error:
+        "A Receita continua sem responder. Confira o CNPJ completo e os CNAEs na Receita e marque “Conferi o CNPJ e o CNAE manualmente” para aprovar.",
+    });
+    expect(receita.lookup).toHaveBeenCalledWith(CNPJ);
+    expect(await statusOf(merchantId)).toBe("pending");
 
     const s2 = await merchantStatusAction(undefined, form({ merchantId, op: "approve", manualCheck: "sim" }));
     expect(s2).toEqual({ ok: "Cliente aprovado." });
-    expect((await d.select().from(merchants).where(eq(merchants.id, merchantId)))[0].status).toBe("active");
+    expect(await statusOf(merchantId)).toBe("active");
+  });
+
+  it("CNPJ de apostas que caiu em revisão é recusado na aprovação quando a Receita volta", async () => {
+    const merchantId = await reviewCnpj();
+    receita.lookup.mockResolvedValue({ ok: true, legalName: "ESCOLA LTDA", cnaes: ["8599604", "9200399"], active: true });
+    expect(await merchantStatusAction(undefined, form({ merchantId, op: "approve", manualCheck: "sim" }))).toEqual({
+      error: "Este CNPJ tem CNAE de apostas. Não atendemos apostas nem jogos de azar.",
+    });
+    expect(await statusOf(merchantId)).toBe("pending");
+
+    receita.lookup.mockResolvedValue({ ok: true, legalName: "ESCOLA LTDA", cnaes: ["8599604"], active: true });
+    expect(await merchantStatusAction(undefined, form({ merchantId, op: "approve" }))).toEqual({ ok: "Cliente aprovado." });
+    expect((await d.select().from(merchants).where(eq(merchants.id, merchantId)))[0]).toMatchObject({
+      status: "active",
+      needsManualReview: false,
+    });
   });
 
   it("aprova sem confirmação quando não precisa de revisão; transições inválidas dão erro em PT", async () => {

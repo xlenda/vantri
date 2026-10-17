@@ -1,14 +1,11 @@
 "use server";
 
-import { eq } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import type { FormState } from "@/app/components/ui/action-form";
 import { GENERIC_ERROR } from "@/app/conta/acesso";
 import { requireUser } from "@/lib/auth/guards";
 import { parseReais } from "@/lib/br/money";
-import { db } from "@/lib/db/client";
-import { merchants } from "@/lib/db/schema";
 import { logError } from "@/lib/log";
 import {
   adminCreateMerchant,
@@ -29,6 +26,8 @@ const MERCHANT_ERRORS: Record<MerchantErrorCode, string> = {
   betting_cnae: "Este CNPJ tem CNAE de apostas. Não atendemos apostas nem jogos de azar.",
   cnpj_inactive: "Este CNPJ não está ativo na Receita Federal.",
   cnpj_lookup_unavailable: "Não foi possível consultar o CNPJ na Receita agora. Tente de novo em instantes.",
+  manual_check_required:
+    "A Receita continua sem responder. Confira o CNPJ completo e os CNAEs na Receita e marque “Conferi o CNPJ e o CNAE manualmente” para aprovar.",
   document_taken: "Já existe um cadastro com este documento.",
   email_taken: "Já existe um cadastro com este e-mail.",
   not_found: "Cliente não encontrado.",
@@ -105,37 +104,32 @@ export async function updateFeesAction(_prev: FormState, fd: FormData): Promise<
   return { ok: "Taxas atualizadas." };
 }
 
-const OPS = {
-  approve: [approveMerchant, "Cliente aprovado."],
+type Op = (id: string, actorId: string, manualCheck: boolean) => Promise<void>;
+const OPS: Record<"approve" | "reject" | "suspend" | "reactivate", readonly [Op, string]> = {
+  approve: [(id, actorId, manualCheck) => approveMerchant(id, actorId, { manualCheck }), "Cliente aprovado."],
   reject: [rejectMerchant, "Cliente recusado."],
   suspend: [suspendMerchant, "Cliente suspenso."],
   reactivate: [reactivateMerchant, "Cliente reativado."],
-} as const;
+};
 const statusForm = z.strictObject({
   merchantId: z.uuid(),
   op: z.enum(["approve", "reject", "suspend", "reactivate"]),
   manualCheck: z.enum(["", "sim"]),
 });
 
-/** Aprovar, recusar, suspender ou reativar. Aprovar cliente em revisão manual exige a confirmação marcada. */
+/**
+ * Aprovar, recusar, suspender ou reativar. Aprovar cliente em revisão manual consulta a Receita de novo; a
+ * confirmação marcada só vale se ela continuar fora do ar (approveMerchant decide, pelo banco, nunca pelo formulário).
+ */
 export async function merchantStatusAction(_prev: FormState, fd: FormData): Promise<FormState> {
   const { user } = await requireUser({ role: "admin" });
   const input = statusForm.safeParse(formFields(fd, ["merchantId", "op", "manualCheck"]));
   if (!input.success) return { error: "Pedido inválido." };
   const { merchantId, op, manualCheck } = input.data;
 
-  if (op === "approve" && manualCheck !== "sim") {
-    // Lido do banco, nunca do formulário: o CNPJ não foi consultado na Receita no cadastro.
-    const [m] = await db()
-      .select({ needsManualReview: merchants.needsManualReview })
-      .from(merchants)
-      .where(eq(merchants.id, merchantId));
-    if (m?.needsManualReview) return { error: "Marque “Conferi o CNPJ e o CNAE manualmente” para aprovar." };
-  }
-
   const [run, done] = OPS[op];
   try {
-    await run(merchantId, user.id);
+    await run(merchantId, user.id, manualCheck === "sim");
   } catch (e) {
     return fail(e, `admin: falha ao ${op} cliente`, { merchant: merchantId });
   } finally {

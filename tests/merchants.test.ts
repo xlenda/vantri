@@ -3,7 +3,7 @@ import { eq } from "drizzle-orm";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { verifyPassword } from "@/lib/auth/password";
 import { lookupCnpj } from "@/lib/br/cnpj-lookup";
-import { isValidCnpj, isValidCpf, maskDocument } from "@/lib/br/documents";
+import { formatCnpj, isValidCnpj, isValidCpf, maskDocument } from "@/lib/br/documents";
 import { decrypt, hmacHex, sha256Hex } from "@/lib/crypto";
 import { type Db, setDb } from "@/lib/db/client";
 import { auditLog, merchants, users } from "@/lib/db/schema";
@@ -100,6 +100,12 @@ describe("documents", () => {
     expect(maskDocument("12345678901")).toBe("***.456.789-**");
     expect(maskDocument("12345678000195")).toBe("12.345.678/****-**");
     expect(maskDocument("12.abc.345/01de-35")).toBe("12.ABC.345/****-**");
+  });
+
+  it("formatCnpj mostra o CNPJ completo e nunca outro documento por inteiro", () => {
+    expect(formatCnpj("11222333000181")).toBe("11.222.333/0001-81");
+    expect(formatCnpj("12.abc.345/01de-35")).toBe("12.ABC.345/01DE-35");
+    expect(formatCnpj("52998224725")).toBe("***.982.247-**");
   });
 
   it("hmacHex é determinístico, separado por finalidade e não é sha256 puro", () => {
@@ -273,6 +279,49 @@ describe("admin", () => {
     const [m] = await d.select().from(merchants).where(eq(merchants.id, merchantId));
     expect(m).toMatchObject({ status: "pending", providerAccountId: null, approvedAt: null });
     expect(await actions()).toEqual([]);
+  });
+
+  it("CNPJ em revisão manual: a aprovação consulta a Receita de novo e aplica CNAE 9200 e inativo", async () => {
+    const spy = vi.spyOn(simulator, "createAccount");
+    const down = vi.fn(async () => ({ ok: false }) as const);
+    const { merchantId } = await signupMerchant(cnpjInput(), { lookup: down });
+    const row = async () => (await d.select().from(merchants).where(eq(merchants.id, merchantId)))[0];
+
+    // A Receita voltou e o CNPJ é de apostas: recusado mesmo com a confirmação manual marcada.
+    const betting = vi.fn(lookupOk(["8599604", "9200399"]));
+    expect(await errorCode(approveMerchant(merchantId, adminId, { lookup: betting, manualCheck: true }))).toBe("betting_cnae");
+    expect(betting).toHaveBeenCalledWith(CNPJ);
+    expect(await errorCode(approveMerchant(merchantId, adminId, { lookup: lookupOk(["8599604"], false) }))).toBe(
+      "cnpj_inactive",
+    );
+    // Continua fora do ar: sem a confirmação do admin, não aprova.
+    expect(await errorCode(approveMerchant(merchantId, adminId, { lookup: down }))).toBe("manual_check_required");
+    expect(await row()).toMatchObject({ status: "pending", needsManualReview: true, providerAccountId: null });
+    expect(spy).not.toHaveBeenCalled();
+    expect(await actions()).toEqual([]);
+
+    // A Receita responde e está tudo certo: aprova sem a confirmação e limpa a revisão.
+    await approveMerchant(merchantId, adminId, { lookup: lookupOk(["8599604"]) });
+    expect(await row()).toMatchObject({ status: "active", needsManualReview: false });
+    expect((await d.select().from(auditLog))[0].meta).toEqual({ merchantId, cnpjCheck: "receita" });
+  });
+
+  it("Receita fora do ar também na aprovação: só com a confirmação manual, registrada no audit_log", async () => {
+    const down = async () => ({ ok: false }) as const;
+    const { merchantId } = await signupMerchant(cnpjInput(), { lookup: down });
+    await approveMerchant(merchantId, adminId, { lookup: down, manualCheck: true });
+    const [m] = await d.select().from(merchants).where(eq(merchants.id, merchantId));
+    expect(m).toMatchObject({ status: "active", needsManualReview: true }); // a Receita nunca confirmou este CNPJ
+    expect((await d.select().from(auditLog))[0].meta).toEqual({ merchantId, cnpjCheck: "manual" });
+
+    // Sem revisão manual (CPF, ou CNPJ conferido no cadastro), a aprovação não consulta nada.
+    const lookup = vi.fn(down);
+    const cpf = (await signupMerchant(cpfInput({ email: "cpf@exemplo.com", document: "11144477735" }))).merchantId;
+    const ok = (await signupMerchant(cnpjInput({ email: "ok@exemplo.com", document: "11444777000161" }), { lookup: lookupOk([]) }))
+      .merchantId;
+    await approveMerchant(cpf, adminId, { lookup });
+    await approveMerchant(ok, adminId, { lookup });
+    expect(lookup).not.toHaveBeenCalled();
   });
 
   it("adminCreateMerchant returns temp password that verifies and must_change_password=true", async () => {
