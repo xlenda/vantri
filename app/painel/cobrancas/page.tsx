@@ -46,8 +46,8 @@ export default async function CobrancasPage({ searchParams }: { searchParams: Se
   return (
     <div className="space-y-8">
       <header>
-        <p className="eyebrow">Receber</p>
-        <h1 className="mt-1 text-2xl sm:text-3xl">Cobranças</h1>
+        <h1 className="text-2xl sm:text-3xl">Cobranças</h1>
+        <p className="mt-2 text-sm text-muted">Gere um QR Code Pix para receber.</p>
       </header>
 
       {simulator && (
