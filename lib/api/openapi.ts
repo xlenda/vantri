@@ -1,4 +1,5 @@
 import { SITE_URL } from "@/app/(site)/site";
+import { isSimulator } from "@/lib/provider";
 import { SCOPES } from "./keys";
 
 // Contrato OpenAPI 3.1 escrito à mão. Mudou rota, campo ou erro? Atualize aqui (o /docs renderiza este objeto).
@@ -165,10 +166,9 @@ const webhook = (type: string, summary: string, description: string, data: strin
   },
 });
 
-export const openapi = {
+const openapi = {
   openapi: "3.1.0",
   info: { title: "API Vantri", version: "1.0.0", description: DESCRIPTION },
-  servers: [{ url: `${SITE_URL}/api/v1`, description: "Produção" }],
   security: [{ bearerAuth: [] }],
   tags: [
     { name: "Saldo" },
@@ -611,3 +611,9 @@ export const openapi = {
     },
   },
 };
+
+/** O contrato servido em /api/v1/openapi.json. `servers` sai na hora do pedido: no simulador, "Demonstração (Pix simulado)". */
+export const openapiDoc = () => ({
+  ...openapi,
+  servers: [{ url: `${SITE_URL}/api/v1`, description: isSimulator() ? "Demonstração (Pix simulado)" : "Produção" }],
+});

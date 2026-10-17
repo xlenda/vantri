@@ -1,10 +1,13 @@
 import { randomBytes } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { generate } from "otplib";
+import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createChargeAction, simulatePaymentAction } from "@/app/painel/cobrancas/actions";
 import { createKeyAction, resendDeliveryAction } from "@/app/painel/integracoes/actions";
 import { createPayoutAction } from "@/app/painel/saques/actions";
+import SaquesPage from "@/app/painel/saques/page";
+import { brl } from "@/lib/br/money";
 import { encrypt } from "@/lib/crypto";
 import { type Db, setDb } from "@/lib/db/client";
 import { apiKeys, charges, merchants, payouts, users, webhookDeliveries, webhookEndpoints } from "@/lib/db/schema";
@@ -255,4 +258,20 @@ it("cobrança de conta de demonstração com o parceiro real ligado: recusada co
     error: expect.stringMatching(/^Esta conta é do ambiente de demonstração \(Pix simulado\)/),
   });
   expect(await d.select().from(charges)).toHaveLength(0);
+});
+
+it("saque concluído: no simulador o aviso diz que foi simulado", async () => {
+  await d.transaction((tx) =>
+    postEntries(tx, [{ merchantId, amountCents: 100_000, bucket: "available", kind: "adjustment", refType: "manual", refId: merchantId }]),
+  );
+  const fd = form({ idempotencyKey: "b".repeat(24), amount: "150,00", pixKeyType: "email", pixKey: "fornecedor@exemplo.com", description: "", code: await codeAt(0) });
+  await expect(createPayoutAction(undefined, fd)).rejects.toThrow("NEXT_REDIRECT");
+  const [p] = await d.select().from(payouts);
+  const page = async () => renderToStaticMarkup(await SaquesPage({ searchParams: Promise.resolve({ feito: p.id }) }));
+
+  expect(await page()).toContain(`Saque simulado de ${brl(15_000)} concluído para fornecedor@exemplo.com. Nenhum dinheiro de verdade foi enviado.`);
+  vi.stubEnv("PIX_PROVIDER", "parceiro");
+  const real = await page();
+  expect(real).toContain(`Saque de ${brl(15_000)} enviado para fornecedor@exemplo.com.`);
+  expect(real).not.toContain("simulado");
 });

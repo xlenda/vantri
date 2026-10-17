@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { AuthShell } from "@/app/components/auth-shell";
+import { DEMO_PUBLIC_TEXT, DemoBanner } from "@/app/components/demo-banner";
 import { Alert } from "@/app/components/ui/alert";
 import { buttonClass } from "@/app/components/ui/button";
 import { SignupForm } from "./signup-form";
@@ -27,6 +28,7 @@ export default async function CadastroPage({ searchParams }: { searchParams: Pro
       title="Criar conta"
       subtitle="Para quem vende cursos, mentorias, e-books, comunidades, software e serviços digitais. Cada cadastro passa por análise antes de liberar o acesso."
     >
+      <DemoBanner text={DEMO_PUBLIC_TEXT} className="mb-5 rounded-xl py-2" />
       <SignupForm />
       <p className="mt-6 text-center text-sm text-muted">
         Já tem conta?{" "}

@@ -338,6 +338,14 @@ it("openapi.json parses and has openapi '3.1.0' and all 8 paths", async () => {
   const doc = JSON.parse(await (await openapiGET()).text());
   expect(doc.openapi).toBe("3.1.0");
   expect(doc.servers[0].url).toMatch(/\/api\/v1$/);
+  // Enquanto o Pix é simulado, o servidor não se chama "Produção".
+  expect(doc.servers[0].description).toBe("Demonstração (Pix simulado)");
+  vi.stubEnv("PIX_PROVIDER", "parceiro");
+  try {
+    expect((await (await openapiGET()).json()).servers[0].description).toBe("Produção");
+  } finally {
+    vi.unstubAllEnvs();
+  }
   expect(Object.keys(doc.paths).sort()).toEqual(
     ["/balance", "/charges", "/charges/{id}", "/med", "/med/{id}", "/payouts", "/payouts/{id}", "/statement"].sort(),
   );

@@ -169,14 +169,21 @@ function Card({ title, visual, children, i }: { title: string; visual: ReactNode
   );
 }
 
+const CONTA_PARCEIRO = [
+  "Conta própria por lojista",
+  `Cada lojista tem a sua conta na ${PSP_NAME}. Nada de saldo de todos misturado numa conta só.`,
+];
+// No simulador ainda não há conta no parceiro: só vale o que é verdade nos dois modos.
+const SALDO_SEPARADO = ["Saldo separado por lojista", "Cada lojista tem o próprio saldo e o próprio extrato. Nada de saldo de todos misturado."];
 const PILARES = [
-  ["Conta própria por lojista", `Cada lojista tem a sua conta na ${PSP_NAME}. Nada de saldo de todos misturado numa conta só.`],
   ["Cadastro com análise", "Com CPF ou CNPJ, todo cadastro é analisado antes de liberar o acesso ao painel."],
   ["Limites claros", "Cobrança de R$ 1,00 a R$ 100.000,00. Saque de até R$ 50.000,00 por pedido."],
   ["Senhas e chaves de API com hash", "Senhas e chaves de API ficam guardadas só como hash. A chave aparece uma única vez, na criação."],
 ];
 
-export function Recursos() {
+/** `simulator` vem do servidor (PIX_PROVIDER não chega ao navegador). */
+export function Recursos({ simulator }: { simulator: boolean }) {
+  const pilares = [simulator ? SALDO_SEPARADO : CONTA_PARCEIRO, ...PILARES];
   return (
     <section id="recursos" aria-labelledby="recursos-titulo" className="py-16 sm:py-24">
       <div className="mx-auto max-w-6xl px-4 sm:px-6">
@@ -214,7 +221,7 @@ export function Recursos() {
 
         <Reveal className="mt-5">
           <ul className="grid gap-px overflow-hidden rounded-3xl border border-line bg-line sm:grid-cols-2 lg:grid-cols-4">
-            {PILARES.map(([t, d]) => (
+            {pilares.map(([t, d]) => (
               <li key={t} className="bg-white p-6">
                 <h3 className="text-base">{t}</h3>
                 <p className="mt-2 text-sm leading-relaxed text-muted">{d}</p>

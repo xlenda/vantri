@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import type { ReactNode } from "react";
 import { Logo } from "@/app/(site)/components/Logo";
+import { DemoBanner } from "@/app/components/demo-banner";
 import { logoutAction } from "@/app/entrar/actions";
 import { painelSession } from "./lib";
 import { PainelNav } from "./nav";
@@ -26,7 +27,11 @@ export default async function PainelLayout({ children }: { children: ReactNode }
           <LogoutButton className="mt-3" />
         </div>
       </aside>
-      <main className="mx-auto w-full min-w-0 max-w-6xl px-4 py-6 sm:px-8 sm:py-10">{children}</main>
+      <main className="mx-auto w-full min-w-0 max-w-6xl px-4 py-6 sm:px-8 sm:py-10">
+        {/* Dentro do conteúdo, não acima da grade: a barra lateral fixa ocupa a altura toda da tela. */}
+        <DemoBanner className="mb-6 rounded-xl py-2" />
+        {children}
+      </main>
     </div>
   );
 }

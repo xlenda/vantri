@@ -52,8 +52,7 @@ export default async function CobrancasPage({ searchParams }: { searchParams: Se
 
       {simulator && (
         <Alert tone="info">
-          <strong>Ambiente de teste.</strong> As cobranças são do simulador: nenhum dinheiro de verdade entra. Use
-          &ldquo;Simular pagamento&rdquo; para ver o fluxo completo.
+          As cobranças são do simulador. Use &ldquo;Simular pagamento&rdquo; numa cobrança para ver o fluxo completo.
         </Alert>
       )}
 

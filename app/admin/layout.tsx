@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import type { ReactNode } from "react";
 import { Logo } from "@/app/(site)/components/Logo";
+import { DemoBanner } from "@/app/components/demo-banner";
 import { buttonClass } from "@/app/components/ui/button";
 import { logoutAction } from "@/app/entrar/actions";
 import { requireUser } from "@/lib/auth/guards";
@@ -14,11 +15,7 @@ export default async function AdminLayout({ children }: { children: ReactNode })
   const { user } = await requireUser({ role: "admin" });
   return (
     <div className="min-h-dvh">
-      {process.env.PIX_PROVIDER === "simulator" && (
-        <p className="bg-accent px-4 py-1.5 text-center text-xs font-semibold text-ink">
-          Ambiente de teste: Pix simulado, sem dinheiro de verdade.
-        </p>
-      )}
+      <DemoBanner />
       <header className="border-b border-line bg-white">
         <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-x-6 gap-y-3 px-4 py-3">
           <Link href="/admin" className="flex items-center gap-2 rounded-md" aria-label="Início do admin">

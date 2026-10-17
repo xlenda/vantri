@@ -1,7 +1,12 @@
 import { eq } from "drizzle-orm";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { Precos } from "@/app/(site)/components/Precos";
+import { Recursos } from "@/app/(site)/components/Recursos";
 import { POST as chargesPOST } from "@/app/api/v1/charges/route";
 import { POST as payoutsPOST } from "@/app/api/v1/payouts/route";
+import { DEMO_PUBLIC_TEXT, DemoBanner } from "@/app/components/demo-banner";
 import { createApiKey } from "@/lib/api/keys";
 import { type Db, setDb } from "@/lib/db/client";
 import { charges, merchants, payouts } from "@/lib/db/schema";
@@ -79,4 +84,28 @@ it("no simulador a conta sim_ funciona; com o parceiro, conta aberta nele també
   await d.update(merchants).set({ providerAccountId: "acc_parceiro_1" }).where(eq(merchants.id, sim));
   expect((await createCharge(sim, { ...CHARGE, external_ref: "pedido-2" })).created).toBe(true);
   expect((await createPayout(sim, PAYOUT, "pedido-saque-0002")).replayed).toBe(false);
+});
+
+describe("aviso de demonstração (PIX_PROVIDER=simulator)", () => {
+  const html = (el: ReturnType<typeof createElement>) => renderToStaticMarkup(el);
+
+  it("faixa só no simulador, com o texto do lugar", () => {
+    vi.stubEnv("PIX_PROVIDER", "simulator");
+    expect(html(createElement(DemoBanner))).toContain("Ambiente de demonstração: Pix simulado, sem dinheiro de verdade.");
+    expect(html(createElement(DemoBanner, { text: DEMO_PUBLIC_TEXT }))).toContain(
+      "Ambiente de demonstração: o Pix é simulado e ainda não movimenta dinheiro.",
+    );
+    vi.stubEnv("PIX_PROVIDER", "parceiro");
+    expect(html(createElement(DemoBanner))).toBe("");
+  });
+
+  it("vitrine: frase de conta no parceiro só fora do simulador", () => {
+    for (const C of [Recursos, Precos]) {
+      const real = html(createElement(C, { simulator: false }));
+      const demo = html(createElement(C, { simulator: true }));
+      expect(real).toContain("Conta própria");
+      expect(demo).not.toContain("Conta própria");
+      expect(demo).toMatch(/Saldo (separado|e extrato separados) por lojista/);
+    }
+  });
 });

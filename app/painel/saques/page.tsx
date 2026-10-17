@@ -6,6 +6,7 @@ import { Table } from "@/app/components/ui/table";
 import { brl, dateTime as dataHora } from "@/lib/br/money";
 import { randomBase62 } from "@/lib/crypto";
 import { getBalance } from "@/lib/money/ledger";
+import { isSimulator } from "@/lib/provider";
 import { getPayout, listPayouts, type PayoutRow } from "@/lib/services/payouts";
 import { feeText, painelSession, PIX_KEY_TYPES, uuidOrUndefined, withQuery } from "../lib";
 import { Pager } from "../pager";
@@ -33,7 +34,7 @@ export default async function SaquesPage({ searchParams }: { searchParams: Promi
         <h1 className="mt-1 text-2xl sm:text-3xl">Saques</h1>
       </header>
 
-      {done && <DoneAlert p={done} replayed={sp.repetido === "1"} />}
+      {done && <DoneAlert p={done} replayed={sp.repetido === "1"} simulator={isSimulator()} />}
 
       <div className="grid gap-6 lg:grid-cols-[minmax(0,24rem)_minmax(0,1fr)]">
         <Card className="h-fit">
@@ -80,21 +81,25 @@ export default async function SaquesPage({ searchParams }: { searchParams: Promi
   );
 }
 
-function DoneAlert({ p, replayed }: { p: PayoutRow; replayed: boolean }) {
+function DoneAlert({ p, replayed, simulator }: { p: PayoutRow; replayed: boolean; simulator: boolean }) {
   if (replayed) return <Alert tone="info">Este saque já tinha sido enviado (mesma solicitação).</Alert>;
+  // No simulador nenhum Pix sai de verdade: o texto não pode dizer que o dinheiro foi enviado.
+  const saque = simulator ? "saque simulado" : "saque";
   if (p.status === "failed") {
     return (
       <Alert>
-        O saque de {brl(p.amountCents)} não foi concluído pelo banco
+        O {saque} de {brl(p.amountCents)} não foi concluído{simulator ? "" : " pelo banco"}
         {p.failureCode ? ` (${p.failureCode})` : ""}. O valor e a tarifa voltaram para o seu saldo.
       </Alert>
     );
   }
   return (
     <Alert tone="ok">
-      {p.status === "completed"
-        ? `Saque de ${brl(p.amountCents)} enviado para ${p.pixKey}.`
-        : `Saque de ${brl(p.amountCents)} em processamento. Ele aparece como concluído assim que o banco confirmar.`}
+      {p.status !== "completed"
+        ? `Saque de ${brl(p.amountCents)} em processamento. Ele aparece como concluído assim que o banco confirmar.`
+        : simulator
+          ? `Saque simulado de ${brl(p.amountCents)} concluído para ${p.pixKey}. Nenhum dinheiro de verdade foi enviado.`
+          : `Saque de ${brl(p.amountCents)} enviado para ${p.pixKey}.`}
     </Alert>
   );
 }

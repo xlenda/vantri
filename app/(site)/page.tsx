@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { create } from "qrcode";
+import { isSimulator } from "@/lib/provider";
 import { CtaFinal } from "./components/CtaFinal";
 import { Dev } from "./components/Dev";
 import { FAQS, Faq } from "./components/Faq";
@@ -52,15 +53,16 @@ const jsonLd = [
 ];
 
 export default function Home() {
+  const simulator = isSimulator();
   return (
     <>
       <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd).replace(/</g, "\\u003c") }} />
       <Hero qr={qrPath(SITE_URL)} />
       <Segmentos />
       <Fatos />
-      <Recursos />
+      <Recursos simulator={simulator} />
       <Dev />
-      <Precos />
+      <Precos simulator={simulator} />
       <Faq />
       <CtaFinal />
     </>

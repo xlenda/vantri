@@ -7,10 +7,11 @@ const INCLUSO = [
   "API REST, webhooks assinados e OpenAPI 3.1",
   "2FA, chaves com escopo e lista de IPs",
   "MED com defesa pelo painel",
-  `Conta própria na ${PSP_NAME}`,
 ];
 
-export function Precos() {
+/** No simulador ainda não há conta no parceiro: o último item diz só o que é verdade nos dois modos. */
+export function Precos({ simulator }: { simulator: boolean }) {
+  const incluso = [...INCLUSO, simulator ? "Saldo e extrato separados por lojista" : `Conta própria na ${PSP_NAME}`];
   return (
     <section id="precos" aria-labelledby="precos-titulo" className="py-16 sm:py-24">
       <div className="mx-auto max-w-6xl px-4 sm:px-6">
@@ -44,7 +45,7 @@ export function Precos() {
             <div className="p-7 sm:p-9">
               <h3 className="text-base">Tudo incluso</h3>
               <ul className="mt-4 space-y-3 text-sm">
-                {INCLUSO.map((t) => (
+                {incluso.map((t) => (
                   <li key={t} className="flex gap-3">
                     <svg viewBox="0 0 16 16" aria-hidden className="mt-0.5 size-4 shrink-0 text-brand" fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round">
                       <path d="M3.5 8.5l3 3 6-7" />
