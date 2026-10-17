@@ -5,6 +5,7 @@ import { maskDocument } from "@/lib/br/documents";
 import { randomBase62 } from "@/lib/crypto";
 import { db } from "@/lib/db/client";
 import { charges, merchants } from "@/lib/db/schema";
+import { logError } from "@/lib/log";
 import { computeFee } from "@/lib/money/fees";
 import { lockMerchant, postEntries } from "@/lib/money/ledger";
 import { getProvider, SIMULATED_ACCOUNT_MESSAGE, simulatedAccountOutsideSimulator } from "@/lib/provider";
@@ -273,7 +274,17 @@ export async function applyChargePaid(
       return "credited" as const;
     });
   } catch (err) {
-    if (err === DUPLICATE) return "duplicate";
-    throw err;
+    if (err !== DUPLICATE) throw err;
+    // Já paga, e o parceiro manda outro Pix (E2E diferente): não credita de novo, mas pode ser um segundo pagamento
+    // da mesma cobrança, que alguém precisa conciliar. Só ids no log.
+    const [cur] = await db().select({ endToEndId: charges.endToEndId }).from(charges).where(eq(charges.id, c.id));
+    if (cur?.endToEndId && cur.endToEndId !== e.endToEndId) {
+      logError(
+        "cobrança: charge.paid de novo com outro endToEndId (possível segundo pagamento, conciliar)",
+        new Error("e2e divergente"),
+        { charge: c.id, endToEndId: e.endToEndId },
+      );
+    }
+    return "duplicate";
   }
 }

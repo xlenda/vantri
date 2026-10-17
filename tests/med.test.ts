@@ -336,3 +336,25 @@ it("list and get respect the merchant; admin sees all; json has exact fields", a
   expect(json).toMatchObject({ id: a.caseId, charge_id: a.chargeId, amount: 1000, status: "open", closed_at: null });
   expect(json.defense_deadline).toBe(a.e.deadline.toISOString());
 });
+
+it("MED fora da regra (cobrança não paga ou soma acima do valor) é aplicado e vai para o log, só com ids", async () => {
+  const err = vi.spyOn(console, "error").mockImplementation(() => {});
+  const { merchantId, chargeId, providerChargeId } = await paidMerchant();
+  expect(await applyMedOpened(simulator.simulateMed(providerChargeId, 10_000))).toBe("opened");
+  expect(err).not.toHaveBeenCalled(); // dentro do valor da cobrança (14990)
+
+  const over = simulator.simulateMed(providerChargeId, 5_000); // 15.000 > 14.990
+  expect(await applyMedOpened(over)).toBe("opened");
+  expect(await getBalance(merchantId)).toMatchObject({ blocked: 15_000 }); // o razão espelha o parceiro
+  const overCase = (await d.select().from(medCases).where(eq(medCases.providerCaseId, over.providerCaseId)))[0];
+  expect(err).toHaveBeenCalledTimes(1);
+  expect(err.mock.calls[0][0]).toMatch(/soma dos MEDs passa do valor/);
+  expect(JSON.parse(err.mock.calls[0][1])).toEqual({ medCase: overCase.id, charge: chargeId, error: "Error" });
+
+  await d.update(charges).set({ status: "pending", paidAt: null }).where(eq(charges.id, chargeId));
+  expect(await applyMedOpened(simulator.simulateMed(providerChargeId, 1))).toBe("opened");
+  expect(err).toHaveBeenCalledTimes(2);
+  expect(err.mock.calls[1][0]).toMatch(/cobrança que não está paga/);
+  expect(err.mock.calls.flat().join(" ")).not.toContain("Suspeita de fraude"); // nada do motivo nem do pagador
+  err.mockRestore();
+});

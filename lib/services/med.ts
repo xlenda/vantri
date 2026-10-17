@@ -1,6 +1,7 @@
 import { and, desc, eq, gt, inArray, sql } from "drizzle-orm";
 import { db, type Tx } from "@/lib/db/client";
 import { charges, medCases, medFiles } from "@/lib/db/schema";
+import { logError } from "@/lib/log";
 import { lockMerchant, postEntries } from "@/lib/money/ledger";
 import type { ProviderEvent } from "@/lib/provider/types";
 import { emit } from "@/lib/services/events";
@@ -72,14 +73,18 @@ async function post(
   }
 }
 
-/** Abre o caso e bloqueia o valor. O disponível pode ficar negativo (lojista já sacou): não limita. */
+/**
+ * Abre o caso e bloqueia o valor. O disponível pode ficar negativo (lojista já sacou): não limita.
+ * MED em cobrança que não está paga, ou que faz a soma dos MEDs passar do valor dela, também é aplicado (o razão
+ * espelha o parceiro: lá o valor já foi bloqueado), mas vai para o log para conciliar.
+ */
 export async function applyMedOpened(e: MedOpened): Promise<"opened" | "duplicate" | "unknown"> {
   if (!Number.isInteger(e.amountCents) || e.amountCents <= 0) {
     throw new MedError("invalid_request", "Valor do MED inválido.");
   }
   return inTx(async (tx) => {
     const [ch] = await tx
-      .select({ id: charges.id, merchantId: charges.merchantId })
+      .select({ id: charges.id, merchantId: charges.merchantId, status: charges.status, amountCents: charges.amountCents })
       .from(charges)
       .where(eq(charges.providerChargeId, e.providerChargeId));
     if (!ch) return "unknown";
@@ -103,6 +108,19 @@ export async function applyMedOpened(e: MedOpened): Promise<"opened" | "duplicat
       ["blocked", c.amountCents],
     ]);
     await emit(tx, c.merchantId, "med.opened", toMedCaseJson(c));
+    const [{ total }] = await tx
+      .select({ total: sql`coalesce(sum(${medCases.amountCents}), 0)`.mapWith(Number) }) // SUM é bigint
+      .from(medCases)
+      .where(eq(medCases.chargeId, ch.id));
+    if (ch.status !== "paid" || total > ch.amountCents) {
+      logError(
+        ch.status !== "paid"
+          ? "med: MED aberto em cobrança que não está paga (conciliar com o parceiro)"
+          : "med: soma dos MEDs passa do valor da cobrança (conciliar com o parceiro)",
+        new Error("med fora da regra"),
+        { medCase: c.id, charge: ch.id },
+      );
+    }
     return "opened";
   });
 }

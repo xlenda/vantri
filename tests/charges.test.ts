@@ -242,9 +242,16 @@ it("paid event credits net once", async () => {
   expect(JSON.stringify(hook.payload)).not.toContain("52998224725");
 
   // Mesmo evento de novo, e um evento repetido com outros dados: nada muda, nada é emitido.
+  const err = vi.spyOn(console, "error").mockImplementation(() => {});
   expect(await applyChargePaid(event)).toBe("duplicate");
+  expect(err).not.toHaveBeenCalled(); // reenvio do mesmo Pix: nada a conciliar
   const replay = { ...simulator.simulatePaid(charge.providerChargeId), payerName: "Outro" };
   expect(await applyChargePaid(replay)).toBe("duplicate");
+  // Outro endToEndId na mesma cobrança: possível segundo pagamento; vai para o log, só com ids.
+  expect(err).toHaveBeenCalledTimes(1);
+  expect(err.mock.calls[0][0]).toMatch(/outro endToEndId/);
+  expect(JSON.parse(err.mock.calls[0][1])).toEqual({ charge: charge.id, endToEndId: replay.endToEndId, error: "Error" });
+  err.mockRestore();
   expect(await getBalance(m)).toEqual({ available: 14767, blocked: 0, total: 14767 });
   expect(await d.select().from(ledgerEntries)).toHaveLength(2);
   expect(await deliveries("charge.paid")).toHaveLength(1);
