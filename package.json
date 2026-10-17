@@ -10,7 +10,8 @@
     "lint": "eslint",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "db:generate": "drizzle-kit generate"
+    "db:generate": "drizzle-kit generate",
+    "seed:admin": "tsx scripts/seed-admin.ts"
   },
   "dependencies": {
     "@node-rs/argon2": "^2.2.2",
