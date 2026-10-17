@@ -36,3 +36,16 @@ it("termos: anexos do MED com o limite do painel (4 MB somados por defesa)", asy
   expect(html).toContain("de até 4 MB somados por defesa");
   expect(html).not.toContain("5 MB cada");
 });
+
+it("produção sem NEXT_PUBLIC_SITE_URL falha alto ao carregar (nunca cai em localhost)", async () => {
+  const site = async () => {
+    vi.resetModules();
+    return import("@/app/(site)/site");
+  };
+  vi.stubEnv("NEXT_PUBLIC_SITE_URL", "");
+  expect((await site()).SITE_URL).toBe("http://localhost:3000"); // fora de produção, o padrão local serve
+  vi.stubEnv("VERCEL_ENV", "production");
+  await expect(site()).rejects.toThrow("NEXT_PUBLIC_SITE_URL não definida: obrigatória em produção (VERCEL_ENV=production).");
+  vi.stubEnv("NEXT_PUBLIC_SITE_URL", " https://vantri.com.br/ ");
+  expect((await site()).SITE_URL).toBe("https://vantri.com.br");
+});

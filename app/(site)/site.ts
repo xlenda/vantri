@@ -1,7 +1,13 @@
 // Fonte única dos valores públicos da vitrine (env com fallback) e do aviso RC 16.
 const env = (v: string | undefined) => v?.trim() ?? "";
 
-export const SITE_URL = (env(process.env.NEXT_PUBLIC_SITE_URL) || "http://localhost:3000").replace(/\/+$/, "");
+const siteUrl = env(process.env.NEXT_PUBLIC_SITE_URL);
+// Produção sem a URL pública: OpenAPI, sitemap e robots sairiam com localhost. Falha alto no build (o navegador
+// não vê VERCEL_ENV, então lá nunca lança).
+if (!siteUrl && process.env.VERCEL_ENV === "production") {
+  throw new Error("NEXT_PUBLIC_SITE_URL não definida: obrigatória em produção (VERCEL_ENV=production).");
+}
+export const SITE_URL = (siteUrl || "http://localhost:3000").replace(/\/+$/, "");
 export const PSP_NAME = env(process.env.NEXT_PUBLIC_PSP_NAME) || "instituição parceira";
 export const LEGAL_NAME = env(process.env.NEXT_PUBLIC_COMPANY_LEGAL_NAME);
 export const CNPJ = env(process.env.NEXT_PUBLIC_COMPANY_CNPJ);
