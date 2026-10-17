@@ -32,7 +32,7 @@ export default async function SaquesPage({ searchParams }: { searchParams: Promi
         <h1 className="mt-1 text-2xl sm:text-3xl">Saques</h1>
       </header>
 
-      {done && <DoneAlert p={done} />}
+      {done && <DoneAlert p={done} replayed={sp.repetido === "1"} />}
 
       <div className="grid gap-6 lg:grid-cols-[minmax(0,24rem)_minmax(0,1fr)]">
         <Card className="h-fit">
@@ -79,7 +79,8 @@ export default async function SaquesPage({ searchParams }: { searchParams: Promi
   );
 }
 
-function DoneAlert({ p }: { p: PayoutRow }) {
+function DoneAlert({ p, replayed }: { p: PayoutRow; replayed: boolean }) {
+  if (replayed) return <Alert tone="info">Este saque já tinha sido enviado (mesma solicitação).</Alert>;
   if (p.status === "failed") {
     return (
       <Alert>

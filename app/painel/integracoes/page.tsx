@@ -1,6 +1,7 @@
 import { desc, eq } from "drizzle-orm";
 import type { Metadata } from "next";
 import Link from "next/link";
+import { Alert } from "@/app/components/ui/alert";
 import { Badge, StatusBadge } from "@/app/components/ui/status-badge";
 import { SubmitButton } from "@/app/components/ui/submit-button";
 import { Card } from "@/app/components/ui/card";
@@ -15,8 +16,18 @@ import { KeyForm, WebhookForm } from "./forms";
 
 export const metadata: Metadata = { title: "Integrações — Vantri" };
 
-export default async function IntegracoesPage() {
+const NOTICE: Record<string, ["ok" | "error", string]> = {
+  revogada: ["ok", "Chave revogada. Pedidos com ela passam a ser recusados."],
+  reenviada: ["ok", "Entrega colocada na fila de novo."],
+  revogar: ["error", "Não foi possível revogar a chave. Recarregue a página e tente de novo."],
+  reenviar: ["error", "Não foi possível reenviar a entrega. Recarregue a página e tente de novo."],
+};
+
+export default async function IntegracoesPage({ searchParams }: { searchParams: Promise<Record<string, string | string[] | undefined>> }) {
   const { merchant } = await painelSession();
+  const sp = await searchParams;
+  const key = String(sp.erro ?? sp.ok ?? "");
+  const notice = Object.hasOwn(NOTICE, key) ? NOTICE[key] : undefined; // ?ok=toString não vira aviso
   // Nunca seleciona key_hash nem secret_enc: o segredo só aparece uma vez, na criação.
   const [keys, endpoints, deliveries] = await Promise.all([
     db()
@@ -70,6 +81,8 @@ export default async function IntegracoesPage() {
           </Link>
         </p>
       </header>
+
+      {notice && <Alert tone={notice[0]}>{notice[1]}</Alert>}
 
       <section aria-labelledby="chaves" className="space-y-4">
         <h2 id="chaves" className="text-lg">

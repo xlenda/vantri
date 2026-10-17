@@ -23,6 +23,9 @@ const nextConfig: NextConfig = {
   // Servidores paralelos (um por agente) precisam de pastas de build separadas.
   distDir: process.env.NEXT_DIST_DIR || ".next",
   poweredByHeader: false,
+  // Defesa de MED manda texto + anexos numa Server Action: até 4 MB somados (padrão do Next: 1 MB).
+  // Mesmo valor em app/painel/med/limits.ts.
+  experimental: { serverActions: { bodySizeLimit: "4mb" } },
   async headers() {
     return [
       {

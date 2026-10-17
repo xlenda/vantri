@@ -7,7 +7,8 @@ import { randomBase62 } from "@/lib/crypto";
 import { logError } from "@/lib/log";
 import { simulator } from "@/lib/provider/simulator";
 import { applyChargePaid, ChargeError, createCharge, getCharge } from "@/lib/services/charges";
-import { CHARGE_EXPIRY, hasControlChars, painelSession, parseReais } from "../lib";
+import { chargeInput, firstIssue, formInput, idInput } from "../input";
+import { painelSession } from "../lib";
 
 export type ChargeFormValues = { amount: string; description: string; expiresIn: string };
 // `attempt` muda a cada envio: o formulário usa como key (o reset automático do React 19 perderia o select).
@@ -18,13 +19,9 @@ export async function createChargeAction(prev: ChargeFormState, fd: FormData): P
   const values = { amount: formText(fd, "amount"), description: formText(fd, "description"), expiresIn: formText(fd, "expiresIn") };
   const fail = (error: string) => ({ error, values, attempt: (prev?.attempt ?? 0) + 1 });
 
-  const amount = parseReais(values.amount);
-  if (amount === null) return fail("Valor inválido. Digite em reais, por exemplo 49,90 ou 1.234,56.");
-  const expiresIn = Number(values.expiresIn);
-  if (!CHARGE_EXPIRY.some(([s]) => s === expiresIn)) return fail("Escolha uma validade da lista.");
-  const description = values.description.trim();
-  if (description.length > 140) return fail("A descrição pode ter até 140 caracteres.");
-  if (hasControlChars(description)) return fail("A descrição tem caracteres inválidos.");
+  const input = formInput(chargeInput, fd);
+  if (!input.success) return fail(firstIssue(input.error));
+  const { amount, description, expiresIn } = input.data;
 
   let id: string;
   try {
@@ -47,8 +44,9 @@ export async function createChargeAction(prev: ChargeFormState, fd: FormData): P
 /** Só com PIX_PROVIDER=simulator e só para cobrança pendente do próprio lojista. */
 export async function simulatePaymentAction(fd: FormData): Promise<void> {
   const { merchant } = await painelSession();
-  if (process.env.PIX_PROVIDER !== "simulator") redirect("/painel/cobrancas");
-  const c = await getCharge(merchant.id, formText(fd, "id")); // de outro lojista → null
+  const input = formInput(idInput, fd);
+  if (process.env.PIX_PROVIDER !== "simulator" || !input.success) redirect("/painel/cobrancas");
+  const c = await getCharge(merchant.id, input.data.id); // de outro lojista → null
   if (!c) redirect("/painel/cobrancas");
   if (c.status === "pending") {
     let ok = true;

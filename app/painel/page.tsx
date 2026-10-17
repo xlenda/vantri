@@ -58,14 +58,14 @@ export default async function PainelInicio() {
 
       <section aria-labelledby="recebido" className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,2fr)]">
         <h2 id="recebido" className="sr-only">
-          Recebido
+          Recebido (bruto)
         </h2>
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-1">
-          <Stat label="Recebido hoje" value={brl(todayStats.total)} hint={pix(todayStats.n)} />
-          <Stat label="Últimos 7 dias" value={brl(week.total)} hint={pix(week.n)} />
+          <Stat label="Recebido (bruto) hoje" value={brl(todayStats.total)} hint={`${pix(todayStats.n)}, antes da tarifa`} />
+          <Stat label="Recebido (bruto) em 7 dias" value={brl(week.total)} hint={`${pix(week.n)}, antes da tarifa`} />
         </div>
         <Card className="!p-5 sm:!p-6">
-          <p className="text-sm font-semibold text-ink">Recebido por dia</p>
+          <p className="text-sm font-semibold text-ink">Recebido por dia (bruto, antes da tarifa)</p>
           <Bars series={series} />
         </Card>
       </section>

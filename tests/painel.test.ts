@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
+import { chargeInput, formInput, idInput, keyInput, payoutInput, webhookInput } from "@/app/painel/input";
 import { csvCell, parseReais, phoneKey, rfc8187 } from "@/app/painel/lib";
+import { attachmentsTooBig, MED_UPLOAD_MAX_BYTES } from "@/app/painel/med/limits";
+import { pixKeyProblem } from "@/lib/services/payouts";
 
 it("rfc8187 escapa acento, espaço, aspas, ; e ' ( ) *", () => {
   expect(rfc8187(`comprovante d'água (1)*; "x".pdf`)).toBe("comprovante%20d%27%C3%A1gua%20%281%29%2A%3B%20%22x%22.pdf");
@@ -45,4 +48,64 @@ describe("csvCell", () => {
     expect(csvCell("\rx")).toBe(`"'\rx"`);
   });
   it("deixa o resto igual", () => expect(csvCell("12,34")).toBe("12,34"));
+});
+
+// Fix 1 da revisão: entrada de toda ação passa por zod estrito (lista branca) e a chave Pix é conferida antes do 2FA.
+const form = (o: Record<string, string | string[]>) => {
+  const fd = new FormData();
+  for (const [k, v] of Object.entries(o)) for (const x of [v].flat()) fd.append(k, x);
+  return fd;
+};
+const errOf = (r: { success: boolean; error?: { issues: { message: string }[] } }) => r.error?.issues[0].message;
+
+describe("entrada das ações (lista branca + zod estrito)", () => {
+  it("cobrança: converte e ignora campo fora da lista", () => {
+    const r = formInput(chargeInput, form({ amount: "1.234,56", description: " Curso ", expiresIn: "3600", merchantId: "x" }));
+    expect(r.success && r.data).toEqual({ amount: 123456, description: "Curso", expiresIn: 3600 });
+  });
+  it.each([
+    [{ amount: "1.234", description: "", expiresIn: "3600" }, "Valor inválido"],
+    [{ amount: "10", description: "", expiresIn: "999" }, "Escolha uma validade da lista."],
+    [{ amount: "10", description: "a\u0000b", expiresIn: "3600" }, "A descrição tem caracteres inválidos."],
+    [{ amount: "10", description: "x".repeat(141), expiresIn: "3600" }, "A descrição pode ter até 140 caracteres."],
+  ])("cobrança recusa %j", (o, msg) => expect(errOf(formInput(chargeInput, form(o)))).toContain(msg));
+
+  const PAYOUT = { idempotencyKey: "a".repeat(24), amount: "150,00", pixKeyType: "phone", pixKey: "(11) 98765-4321", description: "" };
+  it("saque: celular normalizado, chave conferida", () => {
+    const r = formInput(payoutInput, form(PAYOUT));
+    expect(r.success && r.data).toMatchObject({ amount: 15000, pixKeyType: "phone", pixKey: "+5511987654321" });
+  });
+  it.each([
+    [{ pixKeyType: "cpf", pixKey: "529.982.247-24" }, "Chave Pix inválida para CPF"],
+    [{ pixKeyType: "email", pixKey: "sem-arroba" }, "Chave Pix inválida para E-mail"],
+    [{ pixKeyType: "aleatoria" }, "Escolha o tipo da chave Pix."],
+    [{ amount: "0,99" }, "O valor mínimo do saque é R$ 1,00."],
+    [{ amount: "50.000,01" }, "O valor máximo por saque é R$ 50.000,00."],
+    [{ idempotencyKey: "curta" }, "Formulário expirado"],
+  ])("saque recusa %j", (o, msg) => expect(errOf(formInput(payoutInput, form({ ...PAYOUT, ...o })))).toContain(msg));
+
+  it("chave de API: escopos da lista e IPs em lista", () => {
+    const r = formInput(keyInput, form({ name: "Loja", scopes: ["charges:read", "balance:read"], ips: "1.2.3.4\n5.6.7.8, " }));
+    expect(r.success && r.data).toEqual({ name: "Loja", scopes: ["charges:read", "balance:read"], ips: ["1.2.3.4", "5.6.7.8"] });
+    expect(errOf(formInput(keyInput, form({ name: "Loja", scopes: ["admin:all"] })))).toBe("Escopo inválido.");
+    expect(errOf(formInput(keyInput, form({ name: "Loja" })))).toBe("Escolha ao menos um escopo.");
+  });
+  it("webhook e id", () => {
+    expect(errOf(formInput(webhookInput, form({ url: "https://a.com/h" })))).toBe("Escolha ao menos um evento.");
+    expect(errOf(formInput(webhookInput, form({ url: "https://a.com/h", events: ["charge.paid", "x"] })))).toBe("Evento inválido.");
+    expect(formInput(idInput, form({ id: "nao-e-uuid" })).success).toBe(false);
+  });
+});
+
+it("pixKeyProblem (serviço de saque): formato por tipo", () => {
+  expect(pixKeyProblem("cpf", "529.982.247-25")).toBeNull();
+  expect(pixKeyProblem("phone", "+5511987654321")).toBeNull();
+  expect(pixKeyProblem("phone", "11987654321")).toBe("Chave Pix inválida para o tipo phone.");
+  expect(pixKeyProblem("evp", "not-a-uuid")).toBe("Chave Pix inválida para o tipo evp.");
+});
+
+it("anexos do MED: 4 MB somados (menos folga do multipart)", () => {
+  expect(MED_UPLOAD_MAX_BYTES).toBe(4 * 1024 * 1024 - 64 * 1024);
+  expect(attachmentsTooBig([MED_UPLOAD_MAX_BYTES])).toBe(false);
+  expect(attachmentsTooBig([MED_UPLOAD_MAX_BYTES - 10, 11])).toBe(true);
 });

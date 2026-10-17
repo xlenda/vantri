@@ -120,7 +120,6 @@ export const PIX_KEY_TYPES = [
   ["phone", "Celular"],
   ["evp", "Chave aleatória"],
 ] as const;
-export type PixKeyType = (typeof PIX_KEY_TYPES)[number][0];
 
 /** Celular digitado como "(11) 98765-4321" → "+5511987654321" (formato do DICT); o resto passa sem mexer. */
 export function phoneKey(s: string): string {
@@ -141,6 +140,6 @@ export function withQuery(path: string, params: Record<string, string | undefine
 }
 
 /** Só para links de paginação: id de cursor com cara de UUID, senão nada. */
-export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export const uuidOrUndefined = (v: string | string[] | undefined) =>
   typeof v === "string" && UUID_RE.test(v) ? v : undefined;

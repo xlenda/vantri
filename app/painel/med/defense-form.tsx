@@ -5,23 +5,21 @@ import { Alert } from "@/app/components/ui/alert";
 import { Field, inputClass } from "@/app/components/ui/field";
 import { SubmitButton } from "@/app/components/ui/submit-button";
 import { submitDefenseAction } from "./actions";
-
-// Server Action aceita até 1 MB por envio (padrão do Next): o texto e os anexos vão juntos.
-const MAX_TOTAL_BYTES = 900 * 1024;
+import { attachmentsTooBig, MED_UPLOAD_ERROR } from "./limits";
 
 export function DefenseForm({ caseId }: { caseId: string }) {
   const [state, action] = useActionState(submitDefenseAction, undefined);
   const [tooBig, setTooBig] = useState(false);
-  const error = tooBig ? "Os anexos passam de 900 KB somados. Reduza ou comprima os arquivos." : state?.error;
+  const error = tooBig ? MED_UPLOAD_ERROR : state?.error;
   return (
     <form
       key={state?.attempt}
       action={action}
       onSubmit={(e) => {
         const files = (e.currentTarget.elements.namedItem("files") as HTMLInputElement).files;
-        const big = Array.from(files ?? []).reduce((n, f) => n + f.size, 0) > MAX_TOTAL_BYTES;
+        const big = attachmentsTooBig(Array.from(files ?? [], (f) => f.size));
         setTooBig(big);
-        if (big) e.preventDefault(); // não envia: o Next recusaria o corpo inteiro com erro genérico
+        if (big) e.preventDefault(); // não envia: acima do limite o Next recusaria o corpo inteiro com erro genérico
       }}
       className="space-y-4"
     >
@@ -40,7 +38,7 @@ export function DefenseForm({ caseId }: { caseId: string }) {
           className={`${inputClass} h-auto py-2.5`}
         />
       </Field>
-      <Field label="Anexos (opcional)" htmlFor="files" hint="PDF, PNG ou JPEG. Até 5 arquivos e 900 KB somados.">
+      <Field label="Anexos (opcional)" htmlFor="files" hint="PDF, PNG ou JPEG, até 5 arquivos e 4 MB somados.">
         <input
           id="files"
           name="files"
