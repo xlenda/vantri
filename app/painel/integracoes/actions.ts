@@ -7,7 +7,7 @@ import { ApiKeyError, createApiKey, revokeApiKey } from "@/lib/api/keys";
 import { logError } from "@/lib/log";
 import { createEndpoint, resendDelivery, WebhookError } from "@/lib/services/events";
 import { firstIssue, formInput, idInput, keyInput, webhookInput } from "../input";
-import { painelSession } from "../lib";
+import { freshTotpProblem, painelSession } from "../lib";
 
 // Segredo (chave de API, segredo do webhook) só volta aqui, no estado da ação: aparece uma vez e some ao recarregar.
 export type KeyFormState =
@@ -22,13 +22,20 @@ export type WebhookFormState =
 const texts = (fd: FormData, key: string) => fd.getAll(key).filter((v): v is string => typeof v === "string");
 const PAGE = "/painel/integracoes";
 
+/**
+ * Nova chave de API. Ordem igual à do saque: formato dos campos (erro aqui não gasta o código) → código 2FA novo
+ * (errado: para aqui, nada é criado) → createApiKey. Sem o código, quem só tem a sessão criaria uma chave
+ * payouts:write e sacaria pela API sem 2FA.
+ */
 export async function createKeyAction(prev: KeyFormState, fd: FormData): Promise<KeyFormState> {
-  const { merchant } = await painelSession();
+  const { user, merchant } = await painelSession();
   const attempt = (prev?.attempt ?? 0) + 1;
   const values = { name: formText(fd, "name"), scopes: texts(fd, "scopes"), ips: formText(fd, "ips") };
   const fail = (error: string) => ({ attempt, error, values });
   const input = formInput(keyInput, fd);
   if (!input.success) return fail(firstIssue(input.error));
+  const totpProblem = await freshTotpProblem(user.id, fd);
+  if (totpProblem) return fail(totpProblem);
 
   try {
     const { name, scopes, ips } = input.data;

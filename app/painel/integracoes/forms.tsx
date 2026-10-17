@@ -31,6 +31,18 @@ export function KeyForm({ scopes }: { scopes: Options }) {
             className={`${inputClass} h-auto py-2.5 font-mono`}
           />
         </Field>
+        <Input
+          label="Código do app autenticador"
+          name="code"
+          id="chave-codigo"
+          inputMode="numeric"
+          autoComplete="one-time-code"
+          pattern="[0-9]{6}"
+          maxLength={6}
+          required
+          hint="Obrigatório para criar chave: os 6 dígitos que aparecem agora no app."
+          className="font-semibold tracking-[0.3em]"
+        />
         <SubmitButton pendingText="Criando…">Criar chave</SubmitButton>
       </form>
     </div>

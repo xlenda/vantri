@@ -27,19 +27,21 @@ export class ApiKeyError extends Error {
   }
 }
 
+// ponytail: IP exato (sem CIDR nem forma canônica de IPv6); aceitar faixas se algum lojista pedir.
+const ipAllowlist = z
+  .array(
+    z
+      .string()
+      .trim()
+      .toLowerCase()
+      .refine((ip) => isIP(ip) !== 0),
+  )
+  .max(20);
+
 const createSchema = z.strictObject({
   name: z.string().trim().min(1).max(60),
   scopes: z.array(z.enum(SCOPES)).min(1),
-  // ponytail: IP exato (sem CIDR nem forma canônica de IPv6); aceitar faixas se algum lojista pedir.
-  ipAllowlist: z
-    .array(
-      z
-        .string()
-        .trim()
-        .toLowerCase()
-        .refine((ip) => isIP(ip) !== 0),
-    )
-    .max(20),
+  ipAllowlist,
 });
 
 const FIELD_MSG: Record<string, string> = {
@@ -47,6 +49,10 @@ const FIELD_MSG: Record<string, string> = {
   scopes: "Escolha ao menos um escopo válido.",
   ipAllowlist: "Lista de IPs inválida: use até 20 endereços IPv4 ou IPv6.",
 };
+
+/** Lista de IPs: a mensagem do erro, ou null se válida. O painel confere antes de gastar o código 2FA. */
+export const ipAllowlistProblem = (ips: string[]): string | null =>
+  ipAllowlist.safeParse(ips).success ? null : FIELD_MSG.ipAllowlist;
 
 /** A chave (`vk_live_` + 40 base62) só aparece aqui, uma vez; o banco guarda o sha256 e os 12 primeiros caracteres. */
 export async function createApiKey(

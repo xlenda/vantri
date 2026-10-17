@@ -2,12 +2,11 @@
 
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
-import { formText, GENERIC_ERROR, totpCode } from "@/app/conta/acesso";
-import { verifyUserTotp } from "@/lib/auth/session";
+import { formText, GENERIC_ERROR } from "@/app/conta/acesso";
 import { logError } from "@/lib/log";
 import { createPayout, PayoutError } from "@/lib/services/payouts";
 import { firstIssue, formInput, payoutInput } from "../input";
-import { painelSession } from "../lib";
+import { freshTotpProblem, painelSession } from "../lib";
 
 export type PayoutFormValues = { amount: string; pixKeyType: string; pixKey: string; description: string };
 export type PayoutFormState = { error: string; values: PayoutFormValues; attempt: number } | undefined;
@@ -29,12 +28,8 @@ export async function createPayoutAction(prev: PayoutFormState, fd: FormData): P
   const input = formInput(payoutInput, fd); // inclui o formato da chave Pix: erro aqui não gasta o código
   if (!input.success) return fail(firstIssue(input.error));
   const { idempotencyKey, amount, pixKeyType, pixKey, description } = input.data;
-  const code = totpCode(fd);
-  if (!code) return fail("Digite o código de 6 dígitos do app autenticador.");
-
-  if (!(await verifyUserTotp(user.id, code))) {
-    return fail("Código de verificação inválido ou já usado. Espere o próximo código no app e tente de novo.");
-  }
+  const totpProblem = await freshTotpProblem(user.id, fd);
+  if (totpProblem) return fail(totpProblem);
 
   let payoutId: string;
   let replayed: boolean;

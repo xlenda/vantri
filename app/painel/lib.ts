@@ -1,5 +1,7 @@
 import { notFound } from "next/navigation";
+import { totpCode } from "@/app/conta/acesso";
 import { requireUser } from "@/lib/auth/guards";
+import { verifyUserTotp } from "@/lib/auth/session";
 import type { Scope } from "@/lib/api/keys";
 import { brl } from "@/lib/br/money";
 import type { ledgerEntries } from "@/lib/db/schema";
@@ -12,6 +14,19 @@ export async function painelSession() {
   const { user, merchant } = await requireUser({ role: "merchant" });
   if (!merchant) notFound(); // requireUser de lojista sempre traz o merchant; só estreita o tipo
   return { user, merchant };
+}
+
+/**
+ * Código 2FA novo (anti-replay) para o que movimenta dinheiro: saque e criação de chave de API (uma chave com
+ * payouts:write saca pela API). A mensagem do erro, ou null se o código valeu e foi consumido.
+ */
+export async function freshTotpProblem(userId: string, fd: FormData): Promise<string | null> {
+  const code = totpCode(fd);
+  if (!code) return "Digite o código de 6 dígitos do app autenticador.";
+  if (!(await verifyUserTotp(userId, code))) {
+    return "Código de verificação inválido ou já usado. Espere o próximo código no app e tente de novo.";
+  }
+  return null;
 }
 
 const TZ = "America/Sao_Paulo";

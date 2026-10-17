@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { formText } from "@/app/conta/acesso";
-import { SCOPES } from "@/lib/api/keys";
+import { ipAllowlistProblem, SCOPES } from "@/lib/api/keys";
 import { parseReais } from "@/lib/br/money";
 import { pixKeyProblem } from "@/lib/services/payouts";
 import { WEBHOOK_EVENT_TYPES } from "@/lib/services/events";
@@ -82,7 +82,12 @@ export const keyInput = z.strictObject({
   ips: z
     .string()
     .max(2000, "Lista de IPs longa demais: use até 20 endereços.")
-    .transform((s) => s.split(/[\s,;]+/).filter(Boolean)),
+    .transform((s) => s.split(/[\s,;]+/).filter(Boolean))
+    // Conferido aqui, antes do código 2FA: IP digitado errado não gasta o código.
+    .superRefine((ips, ctx) => {
+      const problem = ipAllowlistProblem(ips);
+      if (problem) ctx.addIssue({ code: "custom", message: problem });
+    }),
 });
 
 export const webhookInput = z.strictObject({
