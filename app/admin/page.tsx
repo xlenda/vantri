@@ -1,11 +1,14 @@
 import Link from "next/link";
 import { requireUser } from "@/lib/auth/guards";
-import { brl } from "./format";
+import { brl } from "@/lib/br/money";
+import { todayDate } from "./format";
 import { adminOverview } from "./queries";
 
 export default async function AdminHome() {
   await requireUser({ role: "admin" });
-  const o = await adminOverview();
+  const now = Date.now();
+  const o = await adminOverview(now);
+  const today = todayDate(now);
   const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
   const cards = [
     {
@@ -15,7 +18,7 @@ export default async function AdminHome() {
       note: "aguardando aprovação",
     },
     {
-      href: "/admin/transacoes?tipo=cobrancas&status=paid",
+      href: `/admin/transacoes?tipo=cobrancas&status=paid&de=${today}&ate=${today}`,
       label: "Recebido hoje",
       value: brl(o.paidToday.cents),
       note: plural(o.paidToday.count, "cobrança paga", "cobranças pagas"),

@@ -33,7 +33,7 @@ it("fora de produção usa PGlite em .data/pglite, com as migrations aplicadas a
   expect(await d.select().from(merchants)).toEqual([]);
   expect(db()).toBe(d);
   expect(existsSync(join(dir, ".data", "pglite", "PG_VERSION"))).toBe(true);
-});
+}, 20_000); // PGlite em disco + migrations passam de 5 s com a suíte toda em paralelo
 
 it("em produção sem DATABASE_URL continua lançando", async () => {
   vi.stubEnv("NODE_ENV", "production");

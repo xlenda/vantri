@@ -13,7 +13,7 @@ export const metadata: Metadata = { title: "Admin — Vantri", robots: { index: 
 export default async function AdminLayout({ children }: { children: ReactNode }) {
   const { user } = await requireUser({ role: "admin" });
   return (
-    <div className="min-h-dvh overflow-x-clip">
+    <div className="min-h-dvh">
       {process.env.PIX_PROVIDER === "simulator" && (
         <p className="bg-accent px-4 py-1.5 text-center text-xs font-semibold text-ink">
           Ambiente de teste: Pix simulado, sem dinheiro de verdade.

@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { chargeInput, formInput, idInput, keyInput, payoutInput, webhookInput } from "@/app/painel/input";
-import { csvCell, parseReais, phoneKey, rfc8187 } from "@/app/painel/lib";
+import { csvCell, phoneKey, rfc8187 } from "@/app/painel/lib";
 import { attachmentsTooBig, MED_UPLOAD_MAX_BYTES } from "@/app/painel/med/limits";
+import { parseReais } from "@/lib/br/money";
 import { pixKeyProblem } from "@/lib/services/payouts";
 
 it("rfc8187 escapa acento, espaço, aspas, ; e ' ( ) *", () => {

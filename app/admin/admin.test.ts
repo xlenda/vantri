@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { verifyPassword } from "@/lib/auth/password";
+import { brl } from "@/lib/br/money";
 import { type Db, setDb } from "@/lib/db/client";
 import { charges, medCases, medFiles, merchants, payouts, users } from "@/lib/db/schema";
 import { getBalance } from "@/lib/money/ledger";
@@ -11,7 +12,7 @@ import { seedAdmin } from "@/scripts/seed-admin";
 import { createTestDb } from "@/tests/helpers/db";
 import { newMerchant } from "@/tests/helpers/factories";
 import { createMerchantAction, merchantStatusAction, updateFeesAction } from "./clientes/actions";
-import { brl, parsePercent, parseReais, percent, reais, todayStart } from "./format";
+import { parsePercent, percent, reais, todayDate, todayStart } from "./format";
 import { GET as downloadFile } from "./med/arquivo/[id]/route";
 import { closeMedAction, openTestMedAction } from "./med/actions";
 import { adminOverview, listChargesAdmin, listPayoutsAdmin, parseTxFilters } from "./queries";
@@ -125,21 +126,6 @@ describe("formato", () => {
     for (const bad of ["1,999", "abc", "", "-1", "1,", ",5", "1e2", "1.000,00"]) expect(parsePercent(bad)).toBeNull();
   });
 
-  it("reais viram centavos, com ou sem separador de milhar", () => {
-    expect(parseReais("1,00")).toBe(100);
-    expect(parseReais("0,5")).toBe(50);
-    expect(parseReais("1.234,56")).toBe(123456);
-    expect(parseReais("1234,56")).toBe(123456);
-    expect(parseReais("1234.56")).toBe(123456);
-    expect(parseReais("1.00")).toBe(100);
-    expect(parseReais("1.000")).toBe(100000);
-    expect(parseReais("12")).toBe(1200);
-    expect(parseReais("R$ 2,00")).toBe(200);
-    for (const bad of ["1,234", "", "-1", "abc", "1,2,3", "1.23.456", "99999999999999999999"]) {
-      expect(parseReais(bad)).toBeNull();
-    }
-  });
-
   it("mostra bps e centavos no formato dos campos", () => {
     expect(percent(149)).toBe("1,49");
     expect(percent(0)).toBe("0,00");
@@ -151,6 +137,8 @@ describe("formato", () => {
     // 02:00 UTC do dia 16 = 23:00 do dia 15 em Brasília
     expect(todayStart(Date.parse("2026-10-16T02:00:00Z"))).toBe(Date.parse("2026-10-15T03:00:00Z"));
     expect(todayStart(Date.parse("2026-10-16T03:00:00Z"))).toBe(Date.parse("2026-10-16T03:00:00Z"));
+    expect(todayDate(Date.parse("2026-10-16T02:00:00Z"))).toBe("2026-10-15");
+    expect(todayDate(Date.parse("2026-10-16T03:00:00Z"))).toBe("2026-10-16");
   });
 });
 
@@ -246,6 +234,19 @@ describe("transações", () => {
     const p2 = await listChargesAdmin({ page: 2 }, 3);
     expect(p2.rows.map((r) => r.charge.id)).toEqual([old.id]);
     expect(p2.hasNext).toBe(false);
+  });
+
+  it("com o filtro paga, o período é pelo dia do pagamento (o Recebido hoje do início)", async () => {
+    const a = await merchant();
+    const lateBuyer = await charge(a, {
+      createdAt: day("2026-10-09T22:00:00"),
+      paidAt: day("2026-10-10T09:00:00"),
+    });
+    await charge(a, { createdAt: day("2026-10-10T08:00:00"), paidAt: day("2026-10-11T10:00:00") });
+    const tenth = { page: 1, from: "2026-10-10", to: "2026-10-10" };
+    expect((await listChargesAdmin({ ...tenth, status: "paid" })).rows.map((r) => r.charge.id)).toEqual([lateBuyer.id]);
+    // sem o filtro de status, continua pelo dia da criação
+    expect((await listChargesAdmin(tenth)).rows.map((r) => r.charge.id)).not.toContain(lateBuyer.id);
   });
 
   it("pendente vencida conta como expirada", async () => {
@@ -417,6 +418,10 @@ describe("MED", () => {
     expect(await openTestMedAction(undefined, form({ chargeId: paid.id, amount: "0" }))).toEqual({
       error: "O valor do MED vai de R$ 0,01 até o valor da cobrança.",
     });
+    // "1.000" é ambíguo (milhar ou decimal?): a regra única de lib/br/money recusa
+    expect(await openTestMedAction(undefined, form({ chargeId: paid.id, amount: "1.000" }))).toEqual({
+      error: "Valor inválido. Escreva, por exemplo, 40,00 ou 1.000,00.",
+    });
     expect(await openTestMedAction(undefined, form({ chargeId: "6c0b1d3e-9f1a-4f7e-8a9b-1c2d3e4f5a6b", amount: "1" }))).toEqual({
       error: "Cobrança não encontrada.",
     });
@@ -427,6 +432,27 @@ describe("MED", () => {
     const [c] = await d.select().from(medCases);
     expect([c.chargeId, c.amountCents, c.status]).toEqual([paid.id, 4000, "open"]);
     expect((await getBalance(m)).blocked).toBe(4000);
+  });
+
+  it("a soma dos MEDs da cobrança (qualquer status) não passa do valor dela", async () => {
+    const m = await merchant();
+    const paid = await charge(m, { amountCents: 10000 });
+    expect(await openTestMedAction(undefined, form({ chargeId: paid.id, amount: "60,00" }))).toMatchObject({
+      ok: expect.any(String),
+    });
+    expect(await openTestMedAction(undefined, form({ chargeId: paid.id, amount: "50,00" }))).toEqual({
+      error: `A soma dos MEDs desta cobrança passaria do valor dela. Ainda cabe até ${brl(4000)}.`,
+    });
+    // encerrado também conta
+    const [first] = await d.select().from(medCases);
+    await closeMedAction(undefined, form({ caseId: first.id, outcome: "merchant_won" }));
+    expect(await openTestMedAction(undefined, form({ chargeId: paid.id, amount: "40,01" }))).toMatchObject({
+      error: expect.stringMatching(/^A soma dos MEDs/),
+    });
+    expect(await openTestMedAction(undefined, form({ chargeId: paid.id, amount: "40,00" }))).toMatchObject({
+      ok: expect.any(String),
+    });
+    expect(await d.select().from(medCases)).toHaveLength(2);
   });
 
   it("MED de teste só com o simulador", async () => {
@@ -460,6 +486,17 @@ describe("MED", () => {
     });
     // A cobrança do teste não lançou crédito: só sobra o débito do MED devolvido.
     expect(await getBalance(m)).toMatchObject({ blocked: 0, available: -3000 });
+  });
+
+  it("encerrar MED pelo admin só com o simulador", async () => {
+    const paid = await charge(await merchant());
+    await openTestMedAction(undefined, form({ chargeId: paid.id, amount: "10,00" }));
+    const [c] = await d.select().from(medCases);
+    vi.stubEnv("PIX_PROVIDER", "parceiro");
+    expect(await closeMedAction(undefined, form({ caseId: c.id, outcome: "merchant_won" }))).toEqual({
+      error: "Encerrar MED pelo admin só existe no ambiente de simulação; com o parceiro, o desfecho vem dele.",
+    });
+    expect((await d.select().from(medCases))[0].status).toBe("open");
   });
 
   it("sem sessão de admin as ações de MED não rodam", async () => {

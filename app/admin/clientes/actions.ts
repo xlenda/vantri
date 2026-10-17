@@ -6,6 +6,7 @@ import { z } from "zod";
 import type { FormState } from "@/app/components/ui/action-form";
 import { GENERIC_ERROR } from "@/app/conta/acesso";
 import { requireUser } from "@/lib/auth/guards";
+import { parseReais } from "@/lib/br/money";
 import { db } from "@/lib/db/client";
 import { merchants } from "@/lib/db/schema";
 import { logError } from "@/lib/log";
@@ -19,7 +20,7 @@ import {
   suspendMerchant,
   updateFees,
 } from "@/lib/services/merchants";
-import { formFields, parsePercent, parseReais } from "../format";
+import { formFields, parsePercent } from "../format";
 
 const MERCHANT_ERRORS: Record<MerchantErrorCode, string> = {
   invalid_request: "Confira os dados: nomes com pelo menos 2 letras e um e-mail válido.",

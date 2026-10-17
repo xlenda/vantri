@@ -4,8 +4,9 @@ import { Alert } from "@/app/components/ui/alert";
 import { Card } from "@/app/components/ui/card";
 import { StatusBadge } from "@/app/components/ui/status-badge";
 import { Table } from "@/app/components/ui/table";
+import { brl, dateTime as dataHora } from "@/lib/br/money";
 import { getMedCase, listMedCases, listMedFiles, type MedCaseRow } from "@/lib/services/med";
-import { brl, dataHora, painelSession, uuidOrUndefined, withQuery } from "../lib";
+import { painelSession, uuidOrUndefined, withQuery } from "../lib";
 import { Pager } from "../pager";
 import { DefenseForm } from "./defense-form";
 

@@ -5,7 +5,7 @@ import { Badge, StatusBadge } from "@/app/components/ui/status-badge";
 import { Table } from "@/app/components/ui/table";
 import { requireUser } from "@/lib/auth/guards";
 import { SEGMENT_LABELS, type Segment } from "@/lib/br/documents";
-import { dateTime } from "../format";
+import { dateTime } from "@/lib/br/money";
 import { listMerchantsAdmin, parseMerchantFilters } from "../queries";
 import { CreateMerchantForm } from "./create-form";
 

@@ -3,11 +3,12 @@ import Link from "next/link";
 import { Card } from "@/app/components/ui/card";
 import { StatusBadge } from "@/app/components/ui/status-badge";
 import { Table } from "@/app/components/ui/table";
+import { brl, dateTime as dataHora } from "@/lib/br/money";
 import { db } from "@/lib/db/client";
 import { charges } from "@/lib/db/schema";
 import { getBalance } from "@/lib/money/ledger";
 import { listCharges } from "@/lib/services/charges";
-import { brl, dataHora, diaBrasilia, painelSession } from "./lib";
+import { diaBrasilia, painelSession } from "./lib";
 
 const DAY_MS = 86_400_000;
 

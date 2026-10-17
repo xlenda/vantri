@@ -1,9 +1,10 @@
 import { z } from "zod";
 import { formText } from "@/app/conta/acesso";
 import { SCOPES } from "@/lib/api/keys";
+import { parseReais } from "@/lib/br/money";
 import { pixKeyProblem } from "@/lib/services/payouts";
 import { WEBHOOK_EVENT_TYPES } from "@/lib/services/events";
-import { CHARGE_EXPIRY, hasControlChars, parseReais, phoneKey, PIX_KEY_TYPES } from "./lib";
+import { CHARGE_EXPIRY, hasControlChars, phoneKey, PIX_KEY_TYPES } from "./lib";
 
 // Entrada das Server Actions do painel: lista branca (só as chaves do schema saem do FormData) + zod estrito.
 // Toda checagem traz a própria mensagem em português: a ação mostra a do primeiro problema.

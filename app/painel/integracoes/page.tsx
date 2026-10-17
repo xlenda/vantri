@@ -7,10 +7,11 @@ import { SubmitButton } from "@/app/components/ui/submit-button";
 import { Card } from "@/app/components/ui/card";
 import { Table } from "@/app/components/ui/table";
 import { SCOPES } from "@/lib/api/keys";
+import { dateTime as dataHora } from "@/lib/br/money";
 import { db } from "@/lib/db/client";
 import { apiKeys, webhookDeliveries, webhookEndpoints } from "@/lib/db/schema";
 import { WEBHOOK_EVENT_TYPES } from "@/lib/services/events";
-import { dataHora, EVENT_LABEL, painelSession, SCOPE_LABEL } from "../lib";
+import { EVENT_LABEL, painelSession, SCOPE_LABEL } from "../lib";
 import { resendDeliveryAction, revokeKeyAction } from "./actions";
 import { KeyForm, WebhookForm } from "./forms";
 

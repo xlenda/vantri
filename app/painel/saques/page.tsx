@@ -3,10 +3,11 @@ import { Alert } from "@/app/components/ui/alert";
 import { Card } from "@/app/components/ui/card";
 import { StatusBadge } from "@/app/components/ui/status-badge";
 import { Table } from "@/app/components/ui/table";
+import { brl, dateTime as dataHora } from "@/lib/br/money";
 import { randomBase62 } from "@/lib/crypto";
 import { getBalance } from "@/lib/money/ledger";
 import { getPayout, listPayouts, type PayoutRow } from "@/lib/services/payouts";
-import { brl, dataHora, feeText, painelSession, PIX_KEY_TYPES, uuidOrUndefined, withQuery } from "../lib";
+import { feeText, painelSession, PIX_KEY_TYPES, uuidOrUndefined, withQuery } from "../lib";
 import { Pager } from "../pager";
 import { PayoutForm } from "./payout-form";
 

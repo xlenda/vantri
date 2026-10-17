@@ -1,8 +1,8 @@
-import { and, count, desc, eq, gt, gte, inArray, lt, lte, or, sql } from "drizzle-orm";
+import { and, count, desc, eq, gte, inArray, lt, sql } from "drizzle-orm";
 import { z } from "zod";
 import { db } from "@/lib/db/client";
 import { charges, medCases, merchants, payouts } from "@/lib/db/schema";
-import type { ChargeRow } from "@/lib/services/charges";
+import { chargeAsOf, chargeStatusWhere } from "@/lib/services/charges";
 import type { PayoutRow } from "@/lib/services/payouts";
 import { DAY_MS, dayStart, todayStart } from "./format";
 
@@ -72,7 +72,7 @@ export function parseTxFilters(sp: Params): TxFilters {
 }
 
 /** Período em dias de Brasília; `to` inclusivo. */
-function period(col: typeof charges.createdAt | typeof payouts.createdAt, f: Common) {
+function period(col: typeof charges.createdAt | typeof charges.paidAt | typeof payouts.createdAt, f: Common) {
   return and(
     f.from ? gte(col, new Date(dayStart(f.from))) : undefined,
     f.to ? lt(col, new Date(dayStart(f.to) + DAY_MS)) : undefined,
@@ -81,14 +81,12 @@ function period(col: typeof charges.createdAt | typeof payouts.createdAt, f: Com
 
 const offset = (f: Common, limit: number) => (f.page - 1) * limit;
 
-/** Cobranças de todos os clientes, mais novas primeiro. Pendente vencida sai como `expired` (igual a listCharges). */
+/**
+ * Cobranças de todos os clientes, mais novas primeiro. Pendente vencida sai como `expired` (regra do listCharges).
+ * O período é pelo dia da criação; com o filtro "paga", pelo dia do pagamento (o "Recebido hoje" do início).
+ */
 export async function listChargesAdmin(f: ChargeFilters, limit = PAGE_SIZE) {
   const now = new Date();
-  const byStatus = {
-    pending: and(eq(charges.status, "pending"), gt(charges.expiresAt, now)),
-    expired: or(eq(charges.status, "expired"), and(eq(charges.status, "pending"), lte(charges.expiresAt, now))),
-    paid: eq(charges.status, "paid"),
-  };
   const rows = await db()
     .select({ charge: charges, tradeName: merchants.tradeName })
     .from(charges)
@@ -96,20 +94,15 @@ export async function listChargesAdmin(f: ChargeFilters, limit = PAGE_SIZE) {
     .where(
       and(
         f.merchantId ? eq(charges.merchantId, f.merchantId) : undefined,
-        f.status ? byStatus[f.status] : undefined,
-        period(charges.createdAt, f),
+        f.status ? chargeStatusWhere(f.status, now) : undefined,
+        period(f.status === "paid" ? charges.paidAt : charges.createdAt, f),
       ),
     )
     .orderBy(desc(charges.createdAt), desc(charges.id))
     .limit(limit + 1)
     .offset(offset(f, limit));
   return {
-    rows: rows.slice(0, limit).map((r) => ({
-      ...r,
-      charge: (r.charge.status === "pending" && r.charge.expiresAt <= now
-        ? { ...r.charge, status: "expired" }
-        : r.charge) as ChargeRow,
-    })),
+    rows: rows.slice(0, limit).map((r) => ({ ...r, charge: chargeAsOf(r.charge, now) })),
     hasNext: rows.length > limit,
   };
 }

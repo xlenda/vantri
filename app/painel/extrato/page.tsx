@@ -6,8 +6,9 @@ import { Input } from "@/app/components/ui/field";
 import { Table } from "@/app/components/ui/table";
 import { ApiError } from "@/lib/api/http";
 import { listStatement } from "@/lib/api/statement";
+import { brl, dateTime as dataHora } from "@/lib/br/money";
 import type { ledgerEntries } from "@/lib/db/schema";
-import { brl, dataHora, LEDGER_BUCKET, LEDGER_KIND, LEDGER_REF, painelSession, uuidOrUndefined, withQuery } from "../lib";
+import { LEDGER_BUCKET, LEDGER_KIND, LEDGER_REF, painelSession, uuidOrUndefined, withQuery } from "../lib";
 import { Pager } from "../pager";
 
 export const metadata: Metadata = { title: "Extrato — Vantri" };

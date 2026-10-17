@@ -8,10 +8,11 @@ import { Input, Select } from "@/app/components/ui/field";
 import { StatusBadge } from "@/app/components/ui/status-badge";
 import { SubmitButton } from "@/app/components/ui/submit-button";
 import { requireUser } from "@/lib/auth/guards";
+import { brl, dateTime } from "@/lib/br/money";
 import { db } from "@/lib/db/client";
 import { charges, merchants } from "@/lib/db/schema";
 import { listMedCases, listMedFiles, type MedCaseRow } from "@/lib/services/med";
-import { brl, dateTime, reais } from "../format";
+import { reais } from "../format";
 import { parseMedFilters } from "../queries";
 import { closeMedAction, openTestMedAction } from "./actions";
 
@@ -32,6 +33,7 @@ export default async function MedPage({
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   await requireUser({ role: "admin" });
+  const simulator = process.env.PIX_PROVIDER === "simulator";
   const f = parseMedFilters(await searchParams);
   const { data: cases, nextCursor } = await listMedCases(null, { status: f.status, cursor: f.cursor, limit: PAGE });
   const ids = [...new Set(cases.map((c) => c.merchantId))];
@@ -56,7 +58,7 @@ export default async function MedPage({
         o encerramento.
       </p>
 
-      {process.env.PIX_PROVIDER === "simulator" && <TestMed chargeId={f.chargeId} />}
+      {simulator && <TestMed chargeId={f.chargeId} />}
 
       <nav aria-label="Filtrar por status" className="mt-8 flex flex-wrap gap-2">
         {TABS.map(([status, label]) => (
@@ -79,7 +81,7 @@ export default async function MedPage({
         )}
         {cases.map((c) => (
           <li key={c.id}>
-            <MedCard c={c} tradeName={names.get(c.merchantId) ?? "—"} />
+            <MedCard c={c} tradeName={names.get(c.merchantId) ?? "—"} simulator={simulator} />
           </li>
         ))}
       </ul>
@@ -104,7 +106,7 @@ export default async function MedPage({
   );
 }
 
-async function MedCard({ c, tradeName }: { c: MedCaseRow; tradeName: string }) {
+async function MedCard({ c, tradeName, simulator }: { c: MedCaseRow; tradeName: string; simulator: boolean }) {
   const files = c.defenseText ? await listMedFiles(c.id, { role: "admin" }) : [];
   const closable = c.status === "open" || c.status === "defended";
   return (
@@ -158,25 +160,29 @@ async function MedCard({ c, tradeName }: { c: MedCaseRow; tradeName: string }) {
         </details>
       )}
 
+      {/* Encerrar à mão só no simulador: com o parceiro, o desfecho chega pelo webhook dele. */}
+      {!simulator && closable && <p className="mt-4 text-sm text-muted">Aguardando o desfecho do parceiro.</p>}
       {/* Continua montado depois de encerrar para a resposta da ação aparecer. Sem nada visível dentro (só os
           inputs ocultos que o React põe em formulário de Server Action), não ocupa espaço. */}
-      <ActionForm action={closeMedAction} className="has-[>div]:mt-4">
-        {closable && (
-          <div className="grid gap-3 border-t border-line pt-4 sm:grid-cols-[1fr_auto] sm:items-end">
-            <input type="hidden" name="caseId" value={c.id} />
-            <Select label="Encerrar o caso" name="outcome" required defaultValue="" id={`outcome-${c.id}`}>
-              <option value="" disabled>
-                Escolha o desfecho
-              </option>
-              <option value="merchant_won">A favor do lojista (libera o valor bloqueado)</option>
-              <option value="payer_refunded">Devolver ao pagador (debita o valor bloqueado)</option>
-            </Select>
-            <SubmitButton variant="ghost" pendingText="Encerrando…">
-              Encerrar MED
-            </SubmitButton>
-          </div>
-        )}
-      </ActionForm>
+      {simulator && (
+        <ActionForm action={closeMedAction} className="has-[>div]:mt-4">
+          {closable && (
+            <div className="grid gap-3 border-t border-line pt-4 sm:grid-cols-[1fr_auto] sm:items-end">
+              <input type="hidden" name="caseId" value={c.id} />
+              <Select label="Encerrar o caso" name="outcome" required defaultValue="" id={`outcome-${c.id}`}>
+                <option value="" disabled>
+                  Escolha o desfecho
+                </option>
+                <option value="merchant_won">A favor do lojista (libera o valor bloqueado)</option>
+                <option value="payer_refunded">Devolver ao pagador (debita o valor bloqueado)</option>
+              </Select>
+              <SubmitButton variant="ghost" pendingText="Encerrando…">
+                Encerrar MED
+              </SubmitButton>
+            </div>
+          )}
+        </ActionForm>
+      )}
     </article>
   );
 }

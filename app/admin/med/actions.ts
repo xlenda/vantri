@@ -1,23 +1,26 @@
 "use server";
 
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import type { FormState } from "@/app/components/ui/action-form";
 import { GENERIC_ERROR } from "@/app/conta/acesso";
 import { requireUser } from "@/lib/auth/guards";
+import { brl, parseReais } from "@/lib/br/money";
 import { db } from "@/lib/db/client";
-import { charges } from "@/lib/db/schema";
+import { charges, medCases } from "@/lib/db/schema";
 import { logError } from "@/lib/log";
 import { simulator } from "@/lib/provider/simulator";
 import { applyMedClosed, applyMedOpened, getMedCase, MedError } from "@/lib/services/med";
-import { brl, formFields, parseReais } from "../format";
+import { formFields } from "../format";
 
 function fail(e: unknown, context: string, ids: Record<string, string>): { error: string } {
   if (e instanceof MedError) return { error: e.message }; // mensagens do serviço já são em PT e sem dado interno
   logError(context, e, ids);
   return { error: GENERIC_ERROR };
 }
+
+const simulated = () => process.env.PIX_PROVIDER === "simulator";
 
 function refresh() {
   revalidatePath("/admin/med");
@@ -29,7 +32,7 @@ const openForm = z.strictObject({ chargeId: z.string().trim().max(64), amount: z
 /** Só com o simulador: abre um MED numa cobrança paga, pelo mesmo caminho de um evento do parceiro. */
 export async function openTestMedAction(_prev: FormState, fd: FormData): Promise<FormState> {
   await requireUser({ role: "admin" });
-  if (process.env.PIX_PROVIDER !== "simulator") return { error: "MED de teste só existe no ambiente de simulação." };
+  if (!simulated()) return { error: "MED de teste só existe no ambiente de simulação." };
   const input = openForm.safeParse(formFields(fd, ["chargeId", "amount"]));
   if (!input.success) return { error: "Pedido inválido." };
   const { chargeId } = input.data;
@@ -43,8 +46,20 @@ export async function openTestMedAction(_prev: FormState, fd: FormData): Promise
   if (!c) return { error: "Cobrança não encontrada." };
   if (c.status !== "paid") return { error: "Só dá para abrir MED numa cobrança paga." };
   const amount = parseReais(input.data.amount);
-  if (amount === null || amount < 1 || amount > c.amountCents) {
+  if (amount === null) return { error: "Valor inválido. Escreva, por exemplo, 40,00 ou 1.000,00." };
+  if (amount < 1 || amount > c.amountCents) {
     return { error: "O valor do MED vai de R$ 0,01 até o valor da cobrança." };
+  }
+  // Todos os MEDs da cobrança contam, em qualquer status. SUM é bigint (string no postgres-js): mapWith(Number).
+  // ponytail: checa e depois abre (corrida entre dois cliques passa); é só o simulador, sem trava.
+  const [{ used }] = await db()
+    .select({ used: sql`coalesce(sum(${medCases.amountCents}), 0)`.mapWith(Number) })
+    .from(medCases)
+    .where(eq(medCases.chargeId, chargeId));
+  if (used + amount > c.amountCents) {
+    return {
+      error: `A soma dos MEDs desta cobrança passaria do valor dela. Ainda cabe até ${brl(Math.max(0, c.amountCents - used))}.`,
+    };
   }
 
   try {
@@ -62,9 +77,13 @@ export async function openTestMedAction(_prev: FormState, fd: FormData): Promise
 
 const closeForm = z.strictObject({ caseId: z.uuid(), outcome: z.enum(["merchant_won", "payer_refunded"]) });
 
-/** Encerra o caso: a favor do lojista (libera o bloqueio) ou com devolução ao pagador (debita o bloqueio). */
+/** Só com o simulador. Encerra: a favor do lojista (libera o bloqueio) ou com devolução ao pagador (debita). */
 export async function closeMedAction(_prev: FormState, fd: FormData): Promise<FormState> {
   await requireUser({ role: "admin" });
+  // Com o parceiro real o desfecho chega pelo webhook dele; encerrar aqui faria o nosso razão divergir.
+  if (!simulated()) {
+    return { error: "Encerrar MED pelo admin só existe no ambiente de simulação; com o parceiro, o desfecho vem dele." };
+  }
   const input = closeForm.safeParse(formFields(fd, ["caseId", "outcome"]));
   if (!input.success) return { error: "Pedido inválido." };
   const { caseId, outcome } = input.data;

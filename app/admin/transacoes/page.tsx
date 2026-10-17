@@ -7,7 +7,7 @@ import { StatusBadge } from "@/app/components/ui/status-badge";
 import { Table } from "@/app/components/ui/table";
 import { requireUser } from "@/lib/auth/guards";
 import { maskDocument } from "@/lib/br/documents";
-import { brl, dateTime } from "../format";
+import { brl, dateTime } from "@/lib/br/money";
 import { listChargesAdmin, listPayoutsAdmin, merchantOptions, parseTxFilters, type TxFilters } from "../queries";
 
 export const metadata: Metadata = { title: "Transações — Admin Vantri" };
@@ -101,7 +101,9 @@ export default async function TransacoesPage({
           </Link>
         </div>
       </form>
-      <p className="mt-2 text-xs text-muted">Datas pelo dia da criação, no horário de Brasília.</p>
+      <p className="mt-2 text-xs text-muted">
+        Datas no horário de Brasília: pelo dia da criação ou, com o status “Paga”, pelo dia do pagamento.
+      </p>
 
       <div className="mt-6">
         {f.tipo === "saques" ? <PayoutsTable f={f} /> : <ChargesTable f={f} />}

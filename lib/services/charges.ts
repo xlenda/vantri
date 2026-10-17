@@ -185,6 +185,25 @@ export async function getCharge(merchantId: string, id: string): Promise<ChargeR
 }
 
 /**
+ * Filtro por status como a pessoa vê: pendente já vencida conta como `expired` (o cron ou o `getCharge` gravam a
+ * mudança depois). Usado na lista do lojista e na do admin.
+ */
+export function chargeStatusWhere(status: ChargeRow["status"], now: Date): SQL | undefined {
+  switch (status) {
+    case "pending":
+      return and(eq(charges.status, "pending"), gt(charges.expiresAt, now));
+    case "expired":
+      return or(eq(charges.status, "expired"), and(eq(charges.status, "pending"), lte(charges.expiresAt, now)));
+    case "paid":
+      return eq(charges.status, "paid");
+  }
+}
+
+/** A linha como a pessoa vê em `now`: pendente já vencida sai como `expired` (mesma regra de `chargeStatusWhere`). */
+export const chargeAsOf = (c: ChargeRow, now: Date): ChargeRow =>
+  c.status === "pending" && c.expiresAt <= now ? { ...c, status: "expired" } : c;
+
+/**
  * Mais nova primeiro. `cursor` = id da última da página anterior. Pendente já vencida sai como `expired`
  * (igual a `getCharge`), inclusive no filtro; quem grava a mudança é o cron ou o `getCharge`.
  */
@@ -194,18 +213,13 @@ export async function listCharges(
 ): Promise<{ data: ChargeRow[]; nextCursor: string | null }> {
   const { status, limit, cursor } = parse(listSchema, opts);
   const now = new Date();
-  const byStatus = {
-    pending: and(eq(charges.status, "pending"), gt(charges.expiresAt, now)),
-    expired: or(eq(charges.status, "expired"), and(eq(charges.status, "pending"), lte(charges.expiresAt, now))),
-    paid: eq(charges.status, "paid"),
-  };
   const rows = await db()
     .select()
     .from(charges)
     .where(
       and(
         eq(charges.merchantId, merchantId),
-        status ? byStatus[status] : undefined,
+        status ? chargeStatusWhere(status, now) : undefined,
         // Compara no banco: created_at tem microssegundos, Date do JS só milissegundos.
         // Cursor de outro lojista não acha linha → página vazia.
         cursor
@@ -215,9 +229,7 @@ export async function listCharges(
     )
     .orderBy(desc(charges.createdAt), desc(charges.id))
     .limit(limit + 1);
-  const data = rows
-    .slice(0, limit)
-    .map((c) => (c.status === "pending" && c.expiresAt <= now ? { ...c, status: "expired" as const } : c));
+  const data = rows.slice(0, limit).map((c) => chargeAsOf(c, now));
   return { data, nextCursor: rows.length > limit ? data[data.length - 1].id : null };
 }
 
