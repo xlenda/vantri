@@ -6,7 +6,7 @@ import { useEffect, useRef, useState } from "react";
 const SITE_KEY = process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY;
 
 type TurnstileApi = {
-  render(el: HTMLElement, opts: { sitekey: string; language?: string }): string;
+  render(el: HTMLElement, opts: { sitekey: string; language?: string; size?: "flexible" | "compact" }): string;
   reset(id: string): void;
   remove(id: string): void;
 };
@@ -24,7 +24,9 @@ export function Turnstile({ resetKey }: { resetKey?: unknown }) {
   useEffect(() => {
     const api = (window as { turnstile?: TurnstileApi }).turnstile;
     if (!loaded || !SITE_KEY || !api || !box.current) return;
-    const id = api.render(box.current, { sitekey: SITE_KEY, language: "pt-br" });
+    // flexible ocupa a largura toda, mas tem mínimo de 300 px; abaixo disso, o compacto (150 px) cabe.
+    const size = box.current.clientWidth < 300 ? "compact" : "flexible";
+    const id = api.render(box.current, { sitekey: SITE_KEY, language: "pt-br", size });
     widget.current = id;
     return () => {
       api.remove(id);

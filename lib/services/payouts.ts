@@ -77,11 +77,16 @@ const payoutSchema = z.strictObject({
   description: z.string().max(140).optional(),
 });
 
+/** Formato da chave para o tipo: a mensagem do erro, ou null se válida. O painel confere antes de gastar o código 2FA. */
+export function pixKeyProblem(type: PixKeyType, key: string): string | null {
+  return normalizeKey(type, key) === null ? `Chave Pix inválida para o tipo ${type}.` : null;
+}
+
 function parse(input: unknown): z.output<typeof payoutSchema> {
   const data = parseOr(payoutSchema, input, (msg) => new PayoutError("invalid_request", msg));
-  const pixKey = normalizeKey(data.pix_key_type, data.pix_key);
-  if (!pixKey) throw new PayoutError("invalid_request", `Chave Pix inválida para o tipo ${data.pix_key_type}.`);
-  return { ...data, pix_key: pixKey };
+  const problem = pixKeyProblem(data.pix_key_type, data.pix_key);
+  if (problem) throw new PayoutError("invalid_request", problem);
+  return { ...data, pix_key: normalizeKey(data.pix_key_type, data.pix_key)! };
 }
 
 // Sentinela: lançamento que já existia desfaz a transação inteira (nunca grava meio lote).

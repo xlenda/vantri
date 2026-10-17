@@ -200,6 +200,23 @@ export async function changePassword(
 }
 
 type Merchant = typeof merchants.$inferSelect;
+
+/**
+ * Portão do lojista ativo (checkAccess e as telas de acesso): lojista sem cadastro ou fora de `active` perde a
+ * sessão na hora e volta `dropped`. Admin passa sem consulta; lojista ativo volta com o cadastro.
+ */
+export async function dropIfInactiveMerchant(
+  s: SessionInfo,
+): Promise<{ dropped: true } | { dropped: false; merchant?: Merchant }> {
+  if (s.user.role !== "merchant") return { dropped: false };
+  const [merchant] = s.user.merchantId
+    ? await db().select().from(merchants).where(eq(merchants.id, s.user.merchantId))
+    : [];
+  if (merchant?.status === "active") return { dropped: false, merchant };
+  await db().delete(sessions).where(eq(sessions.id, s.session.id));
+  return { dropped: true };
+}
+
 export type Access =
   | { kind: "ok"; user: SessionInfo["user"]; merchant?: Merchant }
   | { kind: "redirect"; to: string }
@@ -213,24 +230,15 @@ export type Access =
 export async function checkAccess(token: string | undefined, role: "admin" | "merchant"): Promise<Access> {
   const s = token ? await resolveSession(token) : null;
   if (!s) return { kind: "redirect", to: "/entrar" };
+  const gate = await dropIfInactiveMerchant(s);
+  if (gate.dropped) return { kind: "redirect", to: "/entrar?motivo=suspenso" };
   const { user, session } = s;
-
-  let merchant: Merchant | undefined;
-  if (user.role === "merchant") {
-    [merchant] = user.merchantId
-      ? await db().select().from(merchants).where(eq(merchants.id, user.merchantId))
-      : [];
-    if (merchant?.status !== "active") {
-      await db().delete(sessions).where(eq(sessions.id, session.id));
-      return { kind: "redirect", to: "/entrar?motivo=suspenso" };
-    }
-  }
 
   if (!user.totpEnabled) return { kind: "redirect", to: "/conta/2fa" };
   if (!session.mfaPassed) return { kind: "redirect", to: "/entrar/2fa" };
   if (user.mustChangePassword) return { kind: "redirect", to: "/conta/senha" };
   if (user.role !== role) return { kind: "not_found" };
-  return { kind: "ok", user, merchant };
+  return { kind: "ok", user, merchant: gate.merchant };
 }
 
 export async function logout(token: string): Promise<void> {

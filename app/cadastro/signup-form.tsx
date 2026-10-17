@@ -89,7 +89,7 @@ export function SignupForm() {
         label="E-mail"
         name="email"
         type="email"
-        autoComplete="email"
+        autoComplete="username"
         required
         maxLength={254}
         hint="Vai ser o seu login."

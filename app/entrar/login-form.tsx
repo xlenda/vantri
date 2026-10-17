@@ -16,7 +16,7 @@ export function LoginForm() {
         label="E-mail"
         name="email"
         type="email"
-        autoComplete="email"
+        autoComplete="username"
         required
         maxLength={254}
         defaultValue={state?.email}

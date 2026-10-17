@@ -4,6 +4,8 @@ import { redirect } from "next/navigation";
 import QRCode from "qrcode";
 import { AuthShell } from "@/app/components/auth-shell";
 import { TotpForm } from "@/app/components/totp-form";
+import { Alert } from "@/app/components/ui/alert";
+import { buttonClass } from "@/app/components/ui/button";
 import { logoutAction } from "@/app/entrar/actions";
 import { beginTotpSetup } from "@/lib/auth/session";
 import { accessSession, homeFor } from "../acesso";
@@ -44,10 +46,17 @@ export default async function Conta2faPage() {
             unoptimized
             className="mx-auto mt-4 rounded-2xl border border-line"
           />
+          <a href={uri} className={buttonClass("ghost", "mt-4 w-full")}>
+            Abrir no app autenticador
+          </a>
           <p className="mt-4 text-muted">Não consegue ler o QR code? Digite esta chave no app:</p>
           <code className="mt-2 block break-words rounded-xl bg-bg px-3 py-2.5 text-center font-mono text-[15px] font-semibold tracking-wider text-ink">
             {secret.match(/.{1,4}/g)?.join(" ")}
           </code>
+          <Alert tone="info" className="mt-4">
+            A chave muda sempre que esta página é recarregada. Se você já adicionou a Vantri no app antes, apague a
+            entrada antiga e adicione de novo com o QR code acima.
+          </Alert>
         </li>
         <li>
           <p>

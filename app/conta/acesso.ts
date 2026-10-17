@@ -1,10 +1,8 @@
-import { eq } from "drizzle-orm";
 import { cookies, headers } from "next/headers";
 import { redirect } from "next/navigation";
+import { z } from "zod";
 import { getSession } from "@/lib/auth/guards";
-import { logout, SESSION_COOKIE, type SessionInfo } from "@/lib/auth/session";
-import { db } from "@/lib/db/client";
-import { merchants } from "@/lib/db/schema";
+import { dropIfInactiveMerchant, SESSION_COOKIE, type SessionInfo } from "@/lib/auth/session";
 
 // Apoio das telas de acesso (sem "use server": nada aqui vira endpoint de Server Action).
 
@@ -15,6 +13,14 @@ export const TURNSTILE_ERROR = "Não conseguimos confirmar que você é uma pess
 export function formText(fd: FormData, key: string): string {
   const v = fd.get(key);
   return typeof v === "string" ? v : "";
+}
+
+const totpSchema = z.strictObject({ code: z.string().regex(/^\d{6}$/) });
+
+/** Código do app autenticador (espaços ignorados); null se não forem 6 dígitos. */
+export function totpCode(fd: FormData): string | null {
+  const r = totpSchema.safeParse({ code: formText(fd, "code").replace(/\s/g, "") });
+  return r.success ? r.data.code : null;
 }
 
 export const homeFor = (role: SessionInfo["user"]["role"]) => (role === "admin" ? "/admin" : "/painel");
@@ -37,14 +43,6 @@ export async function accessSession(): Promise<{ s: SessionInfo; token: string }
   const s = await getSession();
   const token = (await cookies()).get(SESSION_COOKIE)?.value;
   if (!s || !token) redirect("/entrar");
-  if (s.user.role === "merchant") {
-    const [m] = s.user.merchantId
-      ? await db().select({ status: merchants.status }).from(merchants).where(eq(merchants.id, s.user.merchantId))
-      : [];
-    if (m?.status !== "active") {
-      await logout(token);
-      redirect("/entrar?motivo=suspenso");
-    }
-  }
+  if ((await dropIfInactiveMerchant(s)).dropped) redirect("/entrar?motivo=suspenso");
   return { s, token };
 }
