@@ -1,7 +1,7 @@
-import { and, eq, inArray } from "drizzle-orm";
+import { and, asc, eq, inArray } from "drizzle-orm";
 import { encrypt, randomBase62 } from "@/lib/crypto";
 import { db, type Tx } from "@/lib/db/client";
-import { webhookDeliveries, webhookEndpoints } from "@/lib/db/schema";
+import { webhookAttempts, webhookDeliveries, webhookEndpoints } from "@/lib/db/schema";
 import { lockMerchant } from "@/lib/money/ledger";
 import { enqueueEvent } from "@/lib/webhooks/dispatch";
 import { webhookUrlProblem } from "@/lib/webhooks/ssrf";
@@ -77,6 +77,24 @@ export async function deleteEndpoint(merchantId: string, id: string): Promise<vo
         .returning({ id: webhookEndpoints.id })
     : [];
   if (!rows.length) throw new WebhookError("not_found", "Webhook não encontrado.");
+}
+
+export type DeliveryAttempt = typeof webhookAttempts.$inferSelect;
+
+/**
+ * Histórico de tentativas de uma entrega, só do próprio lojista (join entregas→endpoints→merchant).
+ * Entrega de outro lojista, inexistente ou id inválido → `[]` (IDOR impossível). Ordem crescente por tentativa.
+ */
+export async function listDeliveryAttempts(merchantId: string, deliveryId: string): Promise<DeliveryAttempt[]> {
+  if (!UUID.test(deliveryId)) return [];
+  const rows = await db()
+    .select({ a: webhookAttempts })
+    .from(webhookAttempts)
+    .innerJoin(webhookDeliveries, eq(webhookAttempts.deliveryId, webhookDeliveries.id))
+    .innerJoin(webhookEndpoints, eq(webhookDeliveries.endpointId, webhookEndpoints.id))
+    .where(and(eq(webhookAttempts.deliveryId, deliveryId), eq(webhookEndpoints.merchantId, merchantId)))
+    .orderBy(asc(webhookAttempts.n));
+  return rows.map((r) => r.a);
 }
 
 /** Volta a entrega para `pending` agora. Entrega de outro lojista (ou id inválido) → `not_found`. */

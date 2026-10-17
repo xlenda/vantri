@@ -2,7 +2,7 @@ import { lookup } from "node:dns/promises";
 import { and, arrayContains, asc, eq, inArray, lte } from "drizzle-orm";
 import { decrypt, randomBase62 } from "@/lib/crypto";
 import { db, type Tx } from "@/lib/db/client";
-import { webhookDeliveries, webhookEndpoints } from "@/lib/db/schema";
+import { webhookAttempts, webhookDeliveries, webhookEndpoints } from "@/lib/db/schema";
 import { logError } from "@/lib/log";
 import type { WebhookEventType } from "@/lib/services/events";
 import { signPayload } from "./sign";
@@ -59,26 +59,60 @@ function errorCategory(e: unknown): string {
   return "erro de rede";
 }
 
-async function attempt(
-  d: Claimed,
-  now: Date,
-  send: typeof fetch,
-  resolve: Resolve,
-): Promise<{ statusCode: number | null; error: string | null }> {
-  if (webhookUrlProblem(d.url)) return { statusCode: null, error: "endereço bloqueado" };
+const SNIPPET_MAX = 1024;
+
+/** Lê até ~1 KB do corpo da resposta, tira os controles de C0 e cancela o resto. Nunca guarda header nem segredo. */
+async function readSnippet(res: Response): Promise<string | null> {
+  const reader = res.body?.getReader();
+  if (!reader) return null;
+  const dec = new TextDecoder();
+  let out = "";
+  try {
+    // Lê chunks até ter ≥ SNIPPET_MAX chars (1 byte ≥ 1 char, então isso basta) ou o corpo acabar.
+    while (out.length < SNIPPET_MAX) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      out += dec.decode(value, { stream: true });
+    }
+  } catch {
+    // Corpo cortado/erro no meio: fica o que já veio.
+  } finally {
+    reader.cancel().catch(() => {});
+  }
+  // Tira caracteres de controle (C0/C1/DEL) antes de persistir; mesmo padrão de safeName em med.ts.
+  const clean = out.slice(0, SNIPPET_MAX).replace(/\p{Cc}/gu, " ");
+  return clean.length ? clean : null;
+}
+
+export type SendResult = {
+  statusCode: number | null;
+  error: string | null;
+  latencyMs: number | null;
+  responseSnippet: string | null;
+};
+
+/**
+ * Faz UMA tentativa de entrega: barra URL interna, resolve o DNS e checa cada IP (SSRF), e só então envia
+ * com `redirect:'manual'` e timeout. Reusável pelo dispatcher e pelo "testar envio" do painel — nenhum caminho
+ * de envio novo pode pular este guard. Mede a latência do `fetch` e guarda um trecho ≤ 1 KB da resposta.
+ */
+export async function sendOne(d: Claimed, now: Date, send: typeof fetch, resolve: Resolve): Promise<SendResult> {
+  if (webhookUrlProblem(d.url)) return { statusCode: null, error: "endereço bloqueado", latencyMs: null, responseSnippet: null };
   let addresses: Array<{ address: string }>;
   try {
     addresses = await resolve(webhookHost(new URL(d.url)));
   } catch {
-    return { statusCode: null, error: "falha de DNS" };
+    return { statusCode: null, error: "falha de DNS", latencyMs: null, responseSnippet: null };
   }
-  if (!addresses.length) return { statusCode: null, error: "falha de DNS" };
+  if (!addresses.length) return { statusCode: null, error: "falha de DNS", latencyMs: null, responseSnippet: null };
   // Nome público que aponta para IP interno: não envia.
   // ponytail: DNS rebinding entre este lookup e o connect do fetch (TOCTOU) ainda passa; upgrade = conectar
   // no IP já checado (dispatcher do undici com lookup fixo) mantendo SNI/Host = nome original.
-  if (addresses.some((a) => isBlockedAddress(a.address))) return { statusCode: null, error: "endereço bloqueado" };
+  if (addresses.some((a) => isBlockedAddress(a.address)))
+    return { statusCode: null, error: "endereço bloqueado", latencyMs: null, responseSnippet: null };
+  const body = JSON.stringify(d.payload);
+  const start = performance.now();
   try {
-    const body = JSON.stringify(d.payload);
     const res = await send(d.url, {
       method: "POST",
       headers: {
@@ -90,11 +124,12 @@ async function attempt(
       redirect: "manual", // 3xx não é seguido e conta como falha
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });
-    res.body?.cancel().catch(() => {});
+    const responseSnippet = await readSnippet(res);
+    const latencyMs = Math.round(performance.now() - start);
     const ok = res.status >= 200 && res.status < 300;
-    return { statusCode: res.status, error: ok ? null : `resposta HTTP ${res.status}` };
+    return { statusCode: res.status, error: ok ? null : `resposta HTTP ${res.status}`, latencyMs, responseSnippet };
   } catch (e) {
-    return { statusCode: null, error: errorCategory(e) };
+    return { statusCode: null, error: errorCategory(e), latencyMs: Math.round(performance.now() - start), responseSnippet: null };
   }
 }
 
@@ -130,7 +165,7 @@ export async function dispatchDue(
   // Envio fora de qualquer transação. allSettled: uma gravação que falha não derruba as outras.
   const results = await Promise.allSettled(
     claimed.map(async (d) => {
-      const { statusCode, error } = await attempt(d, now, send, resolve);
+      const { statusCode, error, latencyMs, responseSnippet } = await sendOne(d, now, send, resolve);
       const attempts = d.attempts + 1;
       const ok = error === null;
       const delay = RETRY_DELAYS_SEC[attempts - 1];
@@ -147,6 +182,10 @@ export async function dispatchDue(
               : { nextAttemptAt: new Date(now.getTime() + delay * 1000) }),
         })
         .where(eq(webhookDeliveries.id, d.id));
+      // Histórico da tentativa (diagnóstico no painel): só categoria de erro, trecho ≤ 1 KB, nunca o erro cru.
+      await db()
+        .insert(webhookAttempts)
+        .values({ deliveryId: d.id, n: attempts, statusCode, latencyMs, error, responseSnippet });
       return ok;
     }),
   );
