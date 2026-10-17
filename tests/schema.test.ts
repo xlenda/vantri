@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { PGlite } from "@electric-sql/pglite";
 import { beforeEach, expect, it } from "vitest";
 import type { Db } from "@/lib/db/client";
 import { charges, ledgerEntries } from "@/lib/db/schema";
@@ -59,4 +61,30 @@ it("allows same external_ref for different merchants", async () => {
   await d.insert(charges).values(charge(a, 1));
   await d.insert(charges).values(charge(b, 2));
   expect(await d.$count(charges)).toBe(2);
+});
+
+it("migration 0004: sem os papéis do Supabase não faz nada; com eles, tira todo privilégio de anon/authenticated", async () => {
+  const revoke = readFileSync(new URL("../drizzle/0004_revoke_anon.sql", import.meta.url), "utf8");
+  const pg = new PGlite();
+  await pg.exec(revoke); // PGlite/Postgres comum: os papéis não existem, nada acontece
+  await pg.exec(`
+    CREATE ROLE anon NOLOGIN;
+    CREATE ROLE authenticated NOLOGIN;
+    CREATE TABLE merchants (id serial PRIMARY KEY);
+    GRANT ALL ON merchants TO anon, authenticated;
+    GRANT ALL ON SEQUENCE merchants_id_seq TO anon, authenticated;
+    ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO anon, authenticated;
+  `);
+  await pg.exec(revoke);
+  await pg.exec("CREATE TABLE depois (id int)"); // criada depois: o privilégio padrão também foi tirado
+  const { rows } = await pg.query(`
+    SELECT r AS role,
+      has_table_privilege(r, 'public.merchants', 'SELECT,INSERT,UPDATE,DELETE') AS tabela,
+      has_sequence_privilege(r, 'public.merchants_id_seq', 'USAGE,SELECT,UPDATE') AS sequencia,
+      has_table_privilege(r, 'public.depois', 'SELECT,INSERT,UPDATE,DELETE') AS nova
+    FROM unnest(ARRAY['anon', 'authenticated']) AS r`);
+  expect(rows).toEqual([
+    { role: "anon", tabela: false, sequencia: false, nova: false },
+    { role: "authenticated", tabela: false, sequencia: false, nova: false },
+  ]);
 });
