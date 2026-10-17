@@ -5,7 +5,7 @@ import { type CnpjLookup, lookupCnpj } from "@/lib/br/cnpj-lookup";
 import { isValidCnpj, isValidCpf, normalizeDocument, onlyDigits, SEGMENTS } from "@/lib/br/documents";
 import { decrypt, encrypt, hmacHex, randomBase62 } from "@/lib/crypto";
 import { db, type Tx } from "@/lib/db/client";
-import { merchants, users } from "@/lib/db/schema";
+import { feeHistory, merchants, users } from "@/lib/db/schema";
 import { getProvider } from "@/lib/provider";
 import type { PixProvider } from "@/lib/provider/types";
 import { writeAudit } from "@/lib/services/admin/audit-util";
@@ -254,13 +254,19 @@ export const rejectMerchant = transition("pending", "rejected", "merchant.reject
 export const suspendMerchant = transition("active", "suspended", "merchant.suspend");
 export const reactivateMerchant = transition("suspended", "active", "merchant.reactivate");
 
-/** bps 0–10000, centavos 0–100000, inteiros. */
-export async function updateFees(id: string, fees: Fees, actorId: string): Promise<void> {
+/**
+ * bps 0–10000, centavos 0–100000, inteiros. Cada mudança vira uma linha de vigência em fee_history (na mesma
+ * transação); `planId` quando as taxas vieram de um plano (assignPlanToMerchant), senão é taxa personalizada.
+ */
+export async function updateFees(id: string, fees: Fees, actorId: string, opts: { planId?: string } = {}): Promise<void> {
   const f = parse(feesSchema, fees);
   if (!z.uuid().safeParse(id).success) throw notFound();
   await db().transaction(async (tx) => {
     const [m] = await tx.update(merchants).set(f).where(eq(merchants.id, id)).returning({ id: merchants.id });
     if (!m) throw notFound();
-    await writeAudit(tx, actorId, "merchant.update_fees", { merchantId: id, ...f });
+    await writeAudit(tx, actorId, "merchant.update_fees", { merchantId: id, ...f, ...(opts.planId && { planId: opts.planId }) });
+    await tx
+      .insert(feeHistory)
+      .values({ merchantId: id, ...f, planId: opts.planId ?? null, effectiveFrom: new Date(), actorUserId: actorId });
   });
 }
