@@ -8,6 +8,7 @@ import { dropIfInactiveMerchant, SESSION_COOKIE, type SessionInfo } from "@/lib/
 
 export const GENERIC_ERROR = "Não foi possível concluir agora. Tente de novo em instantes.";
 export const TURNSTILE_ERROR = "Não conseguimos confirmar que você é uma pessoa. Refaça a verificação e tente de novo.";
+export const SIGNUP_CLOSED = "Cadastro temporariamente indisponível.";
 
 /** Valor de texto do formulário; ausente ou arquivo vira "". */
 export function formText(fd: FormData, key: string): string {

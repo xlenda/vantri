@@ -1,5 +1,6 @@
 import { afterEach, beforeAll, expect, it, vi } from "vitest";
 import { signupAction } from "@/app/cadastro/actions";
+import { loginAction } from "@/app/entrar/actions";
 import { clientIp, totpCode } from "@/app/conta/acesso";
 import { setDb } from "@/lib/db/client";
 import { createTestDb } from "./helpers/db";
@@ -87,6 +88,30 @@ it("cadastro em produção sem IP é recusado com o erro genérico", async () =>
   vi.stubEnv("NODE_ENV", "production");
   const r = await signupAction(undefined, signupForm({ noBetting: "sim" }));
   expect(r?.error).toBe("Não foi possível concluir agora. Tente de novo em instantes.");
+  expect(signupMerchant).not.toHaveBeenCalled();
+});
+
+it("produção sem o par de chaves do Turnstile: cadastro fechado; o login continua", async () => {
+  vi.spyOn(console, "error").mockImplementation(() => {}); // par incompleto: logError uma vez
+  vi.stubEnv("VERCEL_ENV", "production");
+  vi.stubEnv("NEXT_PUBLIC_TURNSTILE_SITE_KEY", "");
+  vi.stubEnv("TURNSTILE_SECRET_KEY", "segredo");
+  req.headers.set("x-forwarded-for", "203.0.113.9");
+  const r = await signupAction(undefined, signupForm({ noBetting: "sim" }));
+  expect(r?.error).toBe("Cadastro temporariamente indisponível.");
+  expect(r?.values).toMatchObject({ email: "maria@example.com" });
+  expect(signupMerchant).not.toHaveBeenCalled();
+  // O login não depende do Turnstile para funcionar: segue até conferir a senha.
+  const fd = new FormData();
+  fd.set("email", "ninguem@example.com");
+  fd.set("password", "qualquer-senha");
+  expect(await loginAction(undefined, fd)).toEqual({ error: "E-mail ou senha incorretos.", email: "ninguem@example.com" });
+
+  // Com as duas chaves, o cadastro abre (e o Turnstile passa a valer).
+  vi.stubEnv("NEXT_PUBLIC_TURNSTILE_SITE_KEY", "chave-publica");
+  expect((await signupAction(undefined, signupForm({ noBetting: "sim" })))?.error).toBe(
+    "Não conseguimos confirmar que você é uma pessoa. Refaça a verificação e tente de novo.",
+  );
   expect(signupMerchant).not.toHaveBeenCalled();
 });
 

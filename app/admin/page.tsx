@@ -1,6 +1,8 @@
 import Link from "next/link";
+import { Alert } from "@/app/components/ui/alert";
 import { requireUser } from "@/lib/auth/guards";
 import { brl } from "@/lib/br/money";
+import { signupClosed } from "@/lib/turnstile";
 import { todayDate } from "./format";
 import { adminOverview } from "./queries";
 
@@ -40,6 +42,15 @@ export default async function AdminHome() {
     <>
       <h1 className="text-2xl sm:text-3xl">Início</h1>
       <p className="mt-1 text-sm text-muted">Hoje = desde 00:00 no horário de Brasília.</p>
+      {signupClosed() && (
+        <Alert className="mt-6">
+          <p className="font-semibold">Proteção contra robôs (Turnstile) desligada — configure as duas chaves</p>
+          <p className="mt-1">
+            Defina NEXT_PUBLIC_TURNSTILE_SITE_KEY e TURNSTILE_SECRET_KEY na Vercel e publique de novo. Enquanto isso, o
+            cadastro público fica fechado; o login continua.
+          </p>
+        </Alert>
+      )}
       <ul className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         {cards.map((c) => (
           <li key={c.label}>

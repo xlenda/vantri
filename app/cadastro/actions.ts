@@ -4,8 +4,8 @@ import { redirect } from "next/navigation";
 import { logError } from "@/lib/log";
 import { rateLimit } from "@/lib/ratelimit";
 import { MerchantError, type MerchantErrorCode, signupMerchant } from "@/lib/services/merchants";
-import { verifyTurnstile } from "@/lib/turnstile";
-import { clientIp, formText, GENERIC_ERROR, TURNSTILE_ERROR } from "../conta/acesso";
+import { signupClosed, verifyTurnstile } from "@/lib/turnstile";
+import { clientIp, formText, GENERIC_ERROR, SIGNUP_CLOSED, TURNSTILE_ERROR } from "../conta/acesso";
 
 // Lista branca: só estes campos chegam ao signupMerchant (que ainda valida com zod .strict()).
 const FIELDS = ["legalName", "tradeName", "documentType", "document", "segment", "email"] as const;
@@ -33,6 +33,7 @@ export async function signupAction(prev: SignupState, fd: FormData): Promise<Sig
   const noBetting = formText(fd, "noBetting") === "sim";
   const fail = (error: string) => ({ error, values: { ...fields, noBetting }, attempt: (prev?.attempt ?? 0) + 1 });
 
+  if (signupClosed()) return fail(SIGNUP_CLOSED); // produção sem o par de chaves do Turnstile (Ruling 37)
   if (!noBetting) return fail("Para criar a conta, declare que não opera apostas nem jogos de azar.");
   const password = formText(fd, "password");
   if (password !== formText(fd, "passwordConfirm")) return fail("A confirmação não é igual à senha.");

@@ -19,7 +19,6 @@ import { decrypt, encrypt, sha256Hex } from "@/lib/crypto";
 import { type Db, setDb } from "@/lib/db/client";
 import { accessLogs, merchants, rateLimits, sessions, users } from "@/lib/db/schema";
 import { rateLimit } from "@/lib/ratelimit";
-import { verifyTurnstile } from "@/lib/turnstile";
 import { createTestDb } from "./helpers/db";
 import { newMerchant } from "./helpers/factories";
 
@@ -419,19 +418,64 @@ it("requireUser redirects in order and checks role", async () => {
   expect(await digest(requireUser({ role: "admin" }))).toMatch(/^NEXT_HTTP_ERROR_FALLBACK;404/);
 });
 
-it("verifyTurnstile: no secret passes with one warning; secret without token fails", async () => {
-  const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-  const original = process.env.TURNSTILE_SECRET_KEY;
-  try {
-    delete process.env.TURNSTILE_SECRET_KEY;
+describe("turnstile", () => {
+  // Módulo novo a cada teste: o aviso "uma vez" é estado do módulo.
+  const fresh = async () => {
+    vi.resetModules();
+    return import("@/lib/turnstile");
+  };
+  const keys = (site: string, secret: string) => {
+    vi.stubEnv("NEXT_PUBLIC_TURNSTILE_SITE_KEY", site);
+    vi.stubEnv("TURNSTILE_SECRET_KEY", secret);
+  };
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  it("sem nenhuma chave: desligado, passa, um aviso só", async () => {
+    const { turnstileMode, verifyTurnstile } = await fresh();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    keys("", "");
+    expect(turnstileMode()).toBe("off");
     expect(await verifyTurnstile(undefined, "1.1.1.1")).toBe(true);
     expect(await verifyTurnstile("x", "1.1.1.1")).toBe(true);
     expect(warn).toHaveBeenCalledTimes(1);
-    process.env.TURNSTILE_SECRET_KEY = "segredo";
+  });
+
+  it("par incompleto: desligado (nunca tranca o login) e logError uma vez, só com o nome da chave que falta", async () => {
+    const { turnstileMode, verifyTurnstile } = await fresh();
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    keys("", "segredo-que-nao-pode-ir-pro-log");
+    expect(turnstileMode()).toBe("off");
+    expect(await verifyTurnstile(undefined, "1.1.1.1")).toBe(true);
+    keys("chave-publica", "");
+    expect(turnstileMode()).toBe("off");
+    expect(err).toHaveBeenCalledTimes(1);
+    expect(err.mock.calls[0].join(" ")).toContain("NEXT_PUBLIC_TURNSTILE_SITE_KEY");
+    expect(err.mock.calls[0].join(" ")).not.toContain("segredo-que-nao-pode-ir-pro-log");
+  });
+
+  it("par completo: ligado; sem token, recusa", async () => {
+    const { turnstileMode, verifyTurnstile } = await fresh();
+    keys("chave-publica", "segredo");
+    expect(turnstileMode()).toBe("on");
     expect(await verifyTurnstile(undefined, "1.1.1.1")).toBe(false);
-  } finally {
-    if (original === undefined) delete process.env.TURNSTILE_SECRET_KEY;
-    else process.env.TURNSTILE_SECRET_KEY = original;
-    warn.mockRestore();
-  }
+  });
+
+  it("signupClosed: só em produção e só com o Turnstile desligado", async () => {
+    const { signupClosed } = await fresh();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    keys("chave-publica", "");
+    expect(signupClosed()).toBe(false); // fora de produção, o cadastro segue
+    vi.stubEnv("VERCEL_ENV", "preview");
+    expect(signupClosed()).toBe(false);
+    vi.stubEnv("VERCEL_ENV", "production");
+    expect(signupClosed()).toBe(true);
+    keys("", "");
+    expect(signupClosed()).toBe(true);
+    keys("chave-publica", "segredo");
+    expect(signupClosed()).toBe(false);
+  });
 });

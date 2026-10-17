@@ -4,12 +4,25 @@ import { AuthShell } from "@/app/components/auth-shell";
 import { DEMO_PUBLIC_TEXT, DemoBanner } from "@/app/components/demo-banner";
 import { Alert } from "@/app/components/ui/alert";
 import { buttonClass } from "@/app/components/ui/button";
+import { SIGNUP_CLOSED } from "@/app/conta/acesso";
+import { signupClosed } from "@/lib/turnstile";
 import { SignupForm } from "./signup-form";
 
 export const metadata: Metadata = { title: "Criar conta — Vantri" };
 
 export default async function CadastroPage({ searchParams }: { searchParams: Promise<{ enviado?: string | string[] }> }) {
   const { enviado } = await searchParams;
+
+  if (signupClosed()) {
+    return (
+      <AuthShell title="Criar conta">
+        <Alert tone="info">{SIGNUP_CLOSED} Se você já tem conta, entre normalmente.</Alert>
+        <Link href="/entrar" className={buttonClass("ghost", "mt-6 w-full")}>
+          Entrar
+        </Link>
+      </AuthShell>
+    );
+  }
 
   if (enviado === "1") {
     return (

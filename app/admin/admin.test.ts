@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { eq } from "drizzle-orm";
+import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { verifyPassword } from "@/lib/auth/password";
 import { brl } from "@/lib/br/money";
@@ -15,6 +16,7 @@ import { createMerchantAction, merchantStatusAction, updateFeesAction } from "./
 import { parsePercent, percent, reais, todayDate, todayStart } from "./format";
 import { GET as downloadFile } from "./med/arquivo/[id]/route";
 import { closeMedAction, openTestMedAction } from "./med/actions";
+import AdminHome from "./page";
 import { adminOverview, listChargesAdmin, listPayoutsAdmin, parseTxFilters } from "./queries";
 
 // Guarda de verdade testado em tests/auth.test.ts; aqui só "logado como admin" ou "não logado" (redirect lança).
@@ -195,6 +197,19 @@ describe("início", () => {
       processingPayouts: { count: 2, cents: 3000 },
       openMeds: 2,
     });
+  });
+
+  it("produção sem o par de chaves do Turnstile: cartão de alerta no início", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const card = "Proteção contra robôs (Turnstile) desligada — configure as duas chaves";
+    vi.stubEnv("NEXT_PUBLIC_TURNSTILE_SITE_KEY", "chave-publica");
+    vi.stubEnv("TURNSTILE_SECRET_KEY", "");
+    expect(renderToStaticMarkup(await AdminHome())).not.toContain(card); // fora de produção
+    vi.stubEnv("VERCEL_ENV", "production");
+    expect(renderToStaticMarkup(await AdminHome())).toContain(card);
+    vi.stubEnv("TURNSTILE_SECRET_KEY", "segredo");
+    expect(renderToStaticMarkup(await AdminHome())).not.toContain(card);
   });
 
   it("banco vazio dá zeros", async () => {

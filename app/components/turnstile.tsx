@@ -13,7 +13,7 @@ type TurnstileApi = {
 
 /**
  * Cloudflare Turnstile. Dentro de um <form>, o widget põe o campo `cf-turnstile-response`.
- * Sem NEXT_PUBLIC_TURNSTILE_SITE_KEY não renderiza nada (o servidor também libera sem a chave secreta).
+ * Sem NEXT_PUBLIC_TURNSTILE_SITE_KEY não renderiza nada. O servidor só confere com o par de chaves (turnstileMode).
  * O token vale uma vez: cada `resetKey` novo (nova resposta do servidor) pede outro desafio.
  */
 export function Turnstile({ resetKey }: { resetKey?: unknown }) {
