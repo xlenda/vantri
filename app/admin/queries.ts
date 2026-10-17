@@ -2,7 +2,7 @@ import { and, count, desc, eq, gt, gte, inArray, lt, lte, max, ne, type SQL, sql
 import type { AnyPgColumn } from "drizzle-orm/pg-core";
 import { z } from "zod";
 import { db } from "@/lib/db/client";
-import { charges, cronRuns, ledgerEntries, medCases, merchants, payouts, webhookDeliveries } from "@/lib/db/schema";
+import { charges, cronRuns, ledgerEntries, medCases, merchants, payouts, users, webhookDeliveries } from "@/lib/db/schema";
 import { chargeAsOf, chargeStatusWhere } from "@/lib/services/charges";
 import type { PayoutRow } from "@/lib/services/payouts";
 import { DAY_MS, dayStart, todayDate, todayStart } from "./format";
@@ -132,9 +132,23 @@ export function parseMerchantFilters(sp: Params) {
   return { status: opt(z.enum(MERCHANT_STATUS), first(sp.status)), page: page(first(sp.pagina)) };
 }
 
+/**
+ * Tabela de Sellers: só as colunas que ela mostra (nada de documento nem credencial). `email` é o do primeiro
+ * usuário do lojista (o dono, como no approveMerchant); a tela mascara.
+ */
 export async function listMerchantsAdmin(f: ReturnType<typeof parseMerchantFilters>, limit = PAGE_SIZE) {
   const rows = await db()
-    .select()
+    .select({
+      id: merchants.id,
+      tradeName: merchants.tradeName,
+      status: merchants.status,
+      needsManualReview: merchants.needsManualReview,
+      createdAt: merchants.createdAt,
+      // Alias explícito: em select de uma tabela só o drizzle não qualifica as colunas, e "id" cairia em users.
+      email: sql<
+        string | null
+      >`(select u.email from ${users} u where u.merchant_id = ${merchants}.id order by u.created_at limit 1)`,
+    })
     .from(merchants)
     .where(f.status ? eq(merchants.status, f.status) : undefined)
     .orderBy(desc(merchants.createdAt), desc(merchants.id))

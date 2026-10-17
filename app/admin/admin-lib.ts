@@ -1,4 +1,7 @@
-import { csvCell } from "@/app/painel/lib";
+import { csvCell, maskPixKey } from "@/app/painel/lib";
+
+/** E-mail na tela: "a•••@dominio" (mesma regra da chave Pix de e-mail). Malformado vira "•••", nunca o cru. */
+export const maskEmail = (email: string): string => maskPixKey("email", email);
 
 /**
  * Resposta de exportação CSV neutra contra injeção (reusa csvCell): BOM, separador ";",

@@ -4,9 +4,10 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { verifyPassword } from "@/lib/auth/password";
 import type { Perm } from "@/lib/auth/perms";
-import { brl } from "@/lib/br/money";
+import { brl, dateTime } from "@/lib/br/money";
 import { type Db, setDb } from "@/lib/db/client";
 import {
+  accessLogs,
   charges,
   cronRuns,
   medCases,
@@ -23,9 +24,10 @@ import { signupMerchant } from "@/lib/services/merchants";
 import { seedAdmin } from "@/scripts/seed-admin";
 import { createTestDb } from "@/tests/helpers/db";
 import { newMerchant } from "@/tests/helpers/factories";
-import { csvResponse } from "./admin-lib";
+import { csvResponse, maskEmail } from "./admin-lib";
 import ClientePage from "./clientes/[id]/page";
 import { createMerchantAction, merchantStatusAction, updateFeesAction } from "./clientes/actions";
+import ClientesPage from "./clientes/page";
 import AdminLayout from "./layout";
 import { parsePercent, percent, reais, todayDate, todayStart } from "./format";
 import { GET as downloadFile } from "./med/arquivo/[id]/route";
@@ -756,6 +758,86 @@ describe("ações de clientes", () => {
     const [m] = await d.select().from(merchants).where(eq(merchants.id, id));
     expect([m.status, m.feeInBps]).toEqual(["pending", 149]);
     expect(await d.select().from(merchants)).toHaveLength(1);
+  });
+});
+
+describe("Sellers", () => {
+  const lista = async (sp: Record<string, string> = {}) =>
+    renderToStaticMarkup(await ClientesPage({ searchParams: Promise.resolve(sp) }));
+  const short = (id: string) => `#${id.slice(0, 8)}`;
+  async function seller(status: (typeof merchants.$inferSelect)["status"], email: string, needsManualReview = false) {
+    const id = await merchant(status);
+    await d.update(merchants).set({ needsManualReview }).where(eq(merchants.id, id));
+    await d.insert(users).values({ email, passwordHash: "x", role: "merchant", merchantId: id });
+    return id;
+  }
+
+  it("maskEmail: primeira letra e domínio; nunca o e-mail cru", () => {
+    expect(maskEmail("joana.silva@exemplo.com")).toBe("j•••@exemplo.com");
+    expect(maskEmail("a@b.co")).toBe("a•••@b.co");
+    for (const bad of ["sem-arroba", "@exemplo.com", ""]) expect(maskEmail(bad)).toBe("•••");
+  });
+
+  it("tabela no molde: #id curto, e-mail mascarado, selos Conta/KYC/API e botão Operação", async () => {
+    const ativo = await seller("active", "joana.silva@exemplo.com");
+    const manual = await seller("pending", "pedro.souza@exemplo.com", true);
+    const novo = await seller("pending", "lia.reis@exemplo.com");
+    const suspenso = await seller("suspended", "rui.lima@exemplo.com");
+    const html = await lista();
+
+    for (const col of ["Seller", "Conta", "KYC", "API", "Desde"]) expect(html).toContain(`>${col}</th>`);
+    expect(html).toContain("sem documento, telefone ou credenciais");
+    for (const email of ["j•••@exemplo.com", "p•••@exemplo.com", "l•••@exemplo.com", "r•••@exemplo.com"]) {
+      expect(html).toContain(email);
+    }
+    for (const raw of ["joana.silva", "pedro.souza", "lia.reis", "rui.lima"]) expect(html).not.toContain(raw);
+    expect(html).not.toContain("LTDA"); // razão social (no CPF, o nome completo) só na operação
+
+    const row = (id: string) => html.split("<tr").find((r) => r.includes(short(id))) ?? "";
+    expect(row(ativo)).toMatch(/Ativo[\s\S]*Aprovado[\s\S]*Liberada/);
+    expect(row(manual)).toMatch(/Em análise[\s\S]*Revisão manual[\s\S]*Bloqueada/);
+    expect(row(novo)).toMatch(/Em análise[\s\S]*Em revisão[\s\S]*Bloqueada/);
+    expect(row(suspenso)).toMatch(/Suspenso[\s\S]*Aprovado[\s\S]*Bloqueada/);
+    for (const id of [ativo, manual, novo, suspenso]) {
+      expect(row(id)).toContain(`href="/admin/clientes/${id}"`);
+      expect(row(id)).toContain(">Operação</a>");
+    }
+
+    // abas de status continuam filtrando
+    const ativos = await lista({ status: "active" });
+    expect(ativos).toContain(short(ativo));
+    expect(ativos).not.toContain(short(manual));
+  });
+
+  it("suporte lê a lista sem Criar cliente; papel sem clientes:ler não entra", async () => {
+    await seller("active", "joana.silva@exemplo.com");
+    auth.user = { ...auth.user!, adminRole: "suporte" };
+    const html = await lista();
+    expect(html).toContain("j•••@exemplo.com");
+    expect(html).not.toContain("Criar cliente");
+    auth.user = { ...auth.user!, adminRole: null };
+    await expect(lista()).rejects.toThrow("NEXT_NOT_FOUND");
+  });
+
+  it("operação do cliente: usuários com 2FA e último login; MED só deste cliente", async () => {
+    const id = await seller("active", "joana.silva@exemplo.com");
+    const [u] = await d.update(users).set({ totpEnabled: true }).where(eq(users.merchantId, id)).returning();
+    const [login] = await d.insert(accessLogs).values({ userId: u.id, ip: "203.0.113.7", event: "login" }).returning();
+    const meu = await medCase(id, (await charge(id)).id);
+    const outro = await merchant();
+    const alheio = await medCase(outro, (await charge(outro)).id);
+
+    const html = renderToStaticMarkup(await ClientePage({ params: Promise.resolve({ id }) }));
+    expect(html).toContain("Usuários");
+    const userRow = html.split("<tr").find((r) => r.includes("joana.silva@exemplo.com")) ?? "";
+    expect(userRow).toContain("Ativo"); // 2FA
+    expect(userRow).toContain(dateTime(login.createdAt));
+    expect(userRow).toContain(`usuario=${u.id}`); // ações de usuário ficam em Equipe
+    expect(html).not.toContain("203.0.113.7");
+
+    expect(html).toContain("MED do cliente");
+    expect(html).toContain(`href="/admin/med/${meu.id}"`);
+    expect(html).not.toContain(alheio.id);
   });
 });
 

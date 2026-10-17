@@ -10,7 +10,7 @@ import { Input, Select } from "@/app/components/ui/field";
 import { Badge, StatusBadge } from "@/app/components/ui/status-badge";
 import { SubmitButton } from "@/app/components/ui/submit-button";
 import { Table } from "@/app/components/ui/table";
-import { feeText } from "@/app/painel/lib";
+import { feeText, withQuery } from "@/app/painel/lib";
 import { requireAdmin } from "@/lib/auth/guards";
 import { type Perm, pode } from "@/lib/auth/perms";
 import { formatCnpj, maskDocument, SEGMENT_LABELS, type Segment } from "@/lib/br/documents";
@@ -21,8 +21,11 @@ import { merchants, users } from "@/lib/db/schema";
 import { logError } from "@/lib/log";
 import { getBalance } from "@/lib/money/ledger";
 import { feeChangeNeedsApproval } from "@/lib/services/admin/approvals";
+import { lastLogins } from "@/lib/services/admin/users-admin";
+import { listMedCases } from "@/lib/services/med";
 import { CodeInput } from "../../equipe/forms";
 import { percent, reais } from "../../format";
+import { Deadline } from "../../med/ui";
 import { listChargesAdmin, listPayoutsAdmin } from "../../queries";
 import { merchantStatusAction, requestBalanceAdjustmentAction, updateFeesAction } from "../actions";
 import { OpButton } from "../op-button";
@@ -40,11 +43,18 @@ export default async function ClientePage({ params }: { params: Promise<{ id: st
   const [m] = await db().select().from(merchants).where(eq(merchants.id, id));
   if (!m) notFound();
 
-  const [logins, balance, recentCharges, recentPayouts] = await Promise.all([
-    db().select({ email: users.email }).from(users).where(eq(users.merchantId, id)).orderBy(asc(users.createdAt)),
+  const last = lastLogins();
+  const [logins, balance, recentCharges, recentPayouts, meds] = await Promise.all([
+    db()
+      .select({ id: users.id, email: users.email, totpEnabled: users.totpEnabled, lastLoginAt: last.at })
+      .from(users)
+      .leftJoin(last, eq(last.userId, users.id))
+      .where(eq(users.merchantId, id))
+      .orderBy(asc(users.createdAt)),
     getBalance(id),
     listChargesAdmin({ merchantId: id, page: 1 }, RECENT),
     listPayoutsAdmin({ merchantId: id, page: 1 }, RECENT),
+    can("med:ler") ? listMedCases(id, { limit: RECENT }) : null,
   ]);
 
   const manualReview = m.needsManualReview && m.status === "pending";
@@ -81,7 +91,6 @@ export default async function ClientePage({ params }: { params: Promise<{ id: st
               {fullCnpj && <span className="block text-xs text-muted">Completo enquanto o cadastro está em revisão manual.</span>}
             </Row>
             <Row label="Segmento">{SEGMENT_LABELS[m.segment as Segment] ?? m.segment}</Row>
-            <Row label="Acesso">{logins.map((u) => u.email).join(", ") || "—"}</Row>
             <Row label="Cadastro">{dateTime(m.createdAt)}</Row>
             <Row label="Aprovação">{m.approvedAt ? dateTime(m.approvedAt) : "—"}</Row>
             <Row label="Conta no parceiro">
@@ -167,6 +176,61 @@ export default async function ClientePage({ params }: { params: Promise<{ id: st
           )}
         </Card>
       </div>
+
+      <section className="mt-10">
+        <h2 className="text-lg">Usuários</h2>
+        <div className="mt-3">
+          <Table caption="Usuários" columns={["E-mail", "2FA", "Último login", ""]} empty="Nenhum usuário.">
+            {logins.map((u) => (
+              <tr key={u.id}>
+                <td className="break-all">{u.email}</td>
+                <td>
+                  <Badge tone={u.totpEnabled ? "ok" : "warn"}>{u.totpEnabled ? "Ativo" : "Desligado"}</Badge>
+                </td>
+                <td className="whitespace-nowrap text-muted">{u.lastLoginAt ? dateTime(u.lastLoginAt) : "—"}</td>
+                <td className="text-right">
+                  {/* Reset de 2FA, senha e sessões ficam em Equipe (com step-up); a busca pelo nome acha o usuário. */}
+                  {can("usuarios:operar") && (
+                    <Link
+                      href={withQuery("/admin/equipe", { aba: "usuarios", busca: m.tradeName.slice(0, 100), usuario: u.id })}
+                      className="whitespace-nowrap text-sm font-semibold text-brand hover:underline"
+                    >
+                      Operar acesso
+                    </Link>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </Table>
+        </div>
+      </section>
+
+      {meds && (
+        <section className="mt-10">
+          <h2 className="text-lg">MED do cliente</h2>
+          <div className="mt-3">
+            <Table caption="MED do cliente" columns={["Aberto em", "Valor", "Prazo da defesa", "Status"]} empty="Nenhum MED.">
+              {meds.data.map((c) => (
+                <tr key={c.id}>
+                  <td className="whitespace-nowrap">
+                    <Link href={`/admin/med/${c.id}`} className="font-semibold text-brand hover:underline">
+                      {dateTime(c.createdAt)}
+                    </Link>
+                  </td>
+                  <td className="tabular-nums">{brl(c.amountCents)}</td>
+                  <td>
+                    <Deadline c={c} />
+                  </td>
+                  <td>
+                    <StatusBadge kind="med" status={c.status} />
+                  </td>
+                </tr>
+              ))}
+            </Table>
+            {meds.nextCursor && <p className="mt-2 text-xs text-muted">Mostrando os {RECENT} mais recentes.</p>}
+          </div>
+        </section>
+      )}
 
       <section className="mt-10">
         <div className="flex flex-wrap items-baseline justify-between gap-2">
