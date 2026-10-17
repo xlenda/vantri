@@ -7,6 +7,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 const ITEMS = [
   ["/painel", "Início"],
   ["/painel/cobrancas", "Cobranças"],
+  ["/painel/transacoes", "Transações"],
   ["/painel/extrato", "Extrato"],
   ["/painel/saques", "Saques"],
   ["/painel/integracoes", "Integrações"],
