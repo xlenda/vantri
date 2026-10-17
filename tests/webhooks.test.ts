@@ -4,7 +4,7 @@ import { beforeAll, beforeEach, expect, it } from "vitest";
 import { decrypt } from "@/lib/crypto";
 import { type Db, setDb } from "@/lib/db/client";
 import { webhookDeliveries, webhookEndpoints } from "@/lib/db/schema";
-import { createEndpoint, emit, resendDelivery, type WebhookEventType } from "@/lib/services/events";
+import { createEndpoint, deleteEndpoint, emit, resendDelivery, type WebhookEventType } from "@/lib/services/events";
 import { dispatchDue, RETRY_DELAYS_SEC, type Resolve } from "@/lib/webhooks/dispatch";
 import { signPayload, verifySignature } from "@/lib/webhooks/sign";
 import { createTestDb } from "./helpers/db";
@@ -315,4 +315,34 @@ it("resend of other merchant's delivery is not found", async () => {
   const { send } = stub(200);
   expect(await dispatchDue(50, new Date(), send, publicDns)).toEqual({ delivered: 1, failed: 0 });
   expect(await row(delivery.id)).toMatchObject({ status: "delivered", attempts: 8 });
+});
+
+it("deleteEndpoint: só o dono remove; as entregas vão junto", async () => {
+  const { merchantId, ep, delivery } = await setup();
+  const other = await newMerchant(d, 2);
+  await expect(deleteEndpoint(other, ep.id)).rejects.toMatchObject({ code: "not_found", message: "Webhook não encontrado." });
+  await expect(deleteEndpoint(merchantId, "nao-e-uuid")).rejects.toMatchObject({ code: "not_found" });
+  expect(await row(delivery.id)).toBeDefined();
+
+  await deleteEndpoint(merchantId, ep.id);
+  expect(await d.$count(webhookEndpoints)).toBe(0);
+  expect(await d.$count(webhookDeliveries)).toBe(0);
+  await expect(deleteEndpoint(merchantId, ep.id)).rejects.toMatchObject({ code: "not_found" });
+});
+
+it("no máximo 10 endpoints por lojista; removendo um, cabe outro", async () => {
+  const m = await newMerchant(d, 1);
+  const other = await newMerchant(d, 2);
+  const create = (id: string, n: number) => createEndpoint(id, { url: `https://loja.example.com/h${n}`, events: ["charge.paid"] });
+  const ids = [];
+  for (let n = 0; n < 10; n++) ids.push((await create(m, n)).id);
+  await expect(create(m, 10)).rejects.toMatchObject({
+    code: "invalid_request",
+    message: "Limite de 10 webhooks por conta. Remova um para criar outro.",
+  });
+  expect(await d.$count(webhookEndpoints, eq(webhookEndpoints.merchantId, m))).toBe(10);
+  await expect(create(other, 0)).resolves.toBeTruthy(); // o teto é por lojista
+
+  await deleteEndpoint(m, ids[0]);
+  await expect(create(m, 10)).resolves.toBeTruthy();
 });

@@ -6,7 +6,7 @@ import { after } from "next/server";
 import { formText, GENERIC_ERROR } from "@/app/conta/acesso";
 import { ApiKeyError, createApiKey, revokeApiKey } from "@/lib/api/keys";
 import { logError } from "@/lib/log";
-import { createEndpoint, resendDelivery, WebhookError } from "@/lib/services/events";
+import { createEndpoint, deleteEndpoint, resendDelivery, WebhookError } from "@/lib/services/events";
 import { dispatchDue } from "@/lib/webhooks/dispatch";
 import { firstIssue, formInput, idInput, keyInput, webhookInput } from "../input";
 import { freshTotpProblem, painelSession } from "../lib";
@@ -85,6 +85,23 @@ export async function createWebhookAction(prev: WebhookFormState, fd: FormData):
     logError("painel: criar webhook falhou", e, { merchant: merchant.id });
     return fail(GENERIC_ERROR);
   }
+}
+
+/** Remove o webhook e as entregas dele. De outro lojista → not_found (aviso de erro). */
+export async function deleteWebhookAction(fd: FormData): Promise<void> {
+  const { merchant } = await painelSession();
+  const input = formInput(idInput, fd);
+  let ok = input.success;
+  if (input.success) {
+    try {
+      await deleteEndpoint(merchant.id, input.data.id);
+    } catch (e) {
+      if (!(e instanceof WebhookError)) logError("painel: remover webhook falhou", e, { merchant: merchant.id });
+      ok = false;
+    }
+  }
+  revalidatePath(PAGE);
+  redirect(ok ? `${PAGE}?ok=removido` : `${PAGE}?erro=remover`);
 }
 
 export async function resendDeliveryAction(fd: FormData): Promise<void> {

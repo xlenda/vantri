@@ -2,6 +2,7 @@ import { and, eq, inArray } from "drizzle-orm";
 import { encrypt, randomBase62 } from "@/lib/crypto";
 import { db, type Tx } from "@/lib/db/client";
 import { webhookDeliveries, webhookEndpoints } from "@/lib/db/schema";
+import { lockMerchant } from "@/lib/money/ledger";
 import { enqueueEvent } from "@/lib/webhooks/dispatch";
 import { webhookUrlProblem } from "@/lib/webhooks/ssrf";
 
@@ -30,6 +31,9 @@ export async function emit(tx: Tx, merchantId: string, type: WebhookEventType, d
   await enqueueEvent(tx, merchantId, type, data);
 }
 
+// Cada evento vira um POST por endpoint: sem teto, um lojista faria a Vercel disparar milhares por evento.
+export const MAX_ENDPOINTS = 10;
+
 export async function createEndpoint(
   merchantId: string,
   input: { url: string; events: WebhookEventType[] },
@@ -41,14 +45,39 @@ export async function createEndpoint(
     throw new WebhookError("invalid_request", "Escolha ao menos um evento válido.");
   }
   const secret = `whsec_${randomBase62(32)}`;
-  const [row] = await db()
-    .insert(webhookEndpoints)
-    .values({ merchantId, url: input.url, secretEnc: encrypt(secret), events })
-    .returning({ id: webhookEndpoints.id });
+  // A trava do lojista impede dois pedidos simultâneos de passarem juntos do teto.
+  const row = await db().transaction(async (tx) => {
+    await lockMerchant(tx, merchantId);
+    if ((await tx.$count(webhookEndpoints, eq(webhookEndpoints.merchantId, merchantId))) >= MAX_ENDPOINTS) {
+      throw new WebhookError(
+        "invalid_request",
+        `Limite de ${MAX_ENDPOINTS} webhooks por conta. Remova um para criar outro.`,
+      );
+    }
+    const [r] = await tx
+      .insert(webhookEndpoints)
+      .values({ merchantId, url: input.url, secretEnc: encrypt(secret), events })
+      .returning({ id: webhookEndpoints.id });
+    return r;
+  });
   return { id: row.id, secret };
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Remove o endpoint; as entregas dele vão junto (FK em cascata). Trocar o segredo = criar outro e remover este.
+ * Endpoint de outro lojista (ou id inválido) → `not_found`.
+ */
+export async function deleteEndpoint(merchantId: string, id: string): Promise<void> {
+  const rows = UUID.test(id)
+    ? await db()
+        .delete(webhookEndpoints)
+        .where(and(eq(webhookEndpoints.id, id), eq(webhookEndpoints.merchantId, merchantId)))
+        .returning({ id: webhookEndpoints.id })
+    : [];
+  if (!rows.length) throw new WebhookError("not_found", "Webhook não encontrado.");
+}
 
 /** Volta a entrega para `pending` agora. Entrega de outro lojista (ou id inválido) → `not_found`. */
 export async function resendDelivery(merchantId: string, deliveryId: string): Promise<void> {

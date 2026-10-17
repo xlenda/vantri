@@ -26,7 +26,9 @@ export async function enqueueEvent(tx: Tx, merchantId: string, type: WebhookEven
         eq(webhookEndpoints.active, true),
         arrayContains(webhookEndpoints.events, [type]),
       ),
-    );
+    )
+    // Endpoint removido no meio (deleteEndpoint) espera esta transação: a entrega nunca aponta para um que sumiu.
+    .for("share");
   if (!endpoints.length) return;
   const payload = { id: `evt_${randomBase62(24)}`, type, created_at: new Date().toISOString(), data };
   await tx.insert(webhookDeliveries).values(

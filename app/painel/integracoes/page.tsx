@@ -10,9 +10,9 @@ import { SCOPES } from "@/lib/api/keys";
 import { dateTime as dataHora } from "@/lib/br/money";
 import { db } from "@/lib/db/client";
 import { apiKeys, webhookDeliveries, webhookEndpoints } from "@/lib/db/schema";
-import { WEBHOOK_EVENT_TYPES } from "@/lib/services/events";
+import { MAX_ENDPOINTS, WEBHOOK_EVENT_TYPES } from "@/lib/services/events";
 import { EVENT_LABEL, painelSession, SCOPE_LABEL } from "../lib";
-import { resendDeliveryAction, revokeKeyAction } from "./actions";
+import { deleteWebhookAction, resendDeliveryAction, revokeKeyAction } from "./actions";
 import { KeyForm, WebhookForm } from "./forms";
 
 export const metadata: Metadata = { title: "Integrações — Vantri" };
@@ -20,8 +20,10 @@ export const metadata: Metadata = { title: "Integrações — Vantri" };
 const NOTICE: Record<string, ["ok" | "error", string]> = {
   revogada: ["ok", "Chave revogada. Pedidos com ela passam a ser recusados."],
   reenviada: ["ok", "Entrega colocada na fila de novo."],
+  removido: ["ok", "Webhook removido. As entregas dele foram apagadas junto."],
   revogar: ["error", "Não foi possível revogar a chave. Recarregue a página e tente de novo."],
   reenviar: ["error", "Não foi possível reenviar a entrega. Recarregue a página e tente de novo."],
+  remover: ["error", "Não foi possível remover o webhook. Recarregue a página e tente de novo."],
 };
 
 export default async function IntegracoesPage({ searchParams }: { searchParams: Promise<Record<string, string | string[] | undefined>> }) {
@@ -130,13 +132,24 @@ export default async function IntegracoesPage({ searchParams }: { searchParams: 
           <Card className="h-fit">
             <h3 className="mb-4 text-base">Novo webhook</h3>
             <WebhookForm events={eventOptions} />
+            <p className="mt-4 text-xs text-muted">
+              Até {MAX_ENDPOINTS} webhooks por conta. Para trocar o segredo, crie um novo e remova o antigo.
+            </p>
           </Card>
-          <Table columns={["URL", "Eventos", "Situação"]} empty="Nenhum webhook criado." caption="Webhooks">
+          <Table columns={["URL", "Eventos", "Situação", ""]} empty="Nenhum webhook criado." caption="Webhooks">
             {endpoints.map((w) => (
               <tr key={w.id}>
                 <td className="break-all font-medium">{w.url}</td>
                 <td className="text-xs">{w.events.join(", ")}</td>
                 <td>{w.active ? <Badge tone="ok">Ativo</Badge> : <Badge>Inativo</Badge>}</td>
+                <td className="text-right">
+                  <form action={deleteWebhookAction}>
+                    <input type="hidden" name="id" value={w.id} />
+                    <SubmitButton variant="ghost" className="!h-9 !px-3.5 text-xs" pendingText="Removendo…">
+                      Remover
+                    </SubmitButton>
+                  </form>
+                </td>
               </tr>
             ))}
           </Table>

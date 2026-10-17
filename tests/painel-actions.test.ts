@@ -4,7 +4,7 @@ import { generate } from "otplib";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createChargeAction, simulatePaymentAction } from "@/app/painel/cobrancas/actions";
-import { createKeyAction, resendDeliveryAction } from "@/app/painel/integracoes/actions";
+import { createKeyAction, deleteWebhookAction, resendDeliveryAction } from "@/app/painel/integracoes/actions";
 import { createPayoutAction } from "@/app/painel/saques/actions";
 import SaquesPage from "@/app/painel/saques/page";
 import { brl } from "@/lib/br/money";
@@ -274,4 +274,19 @@ it("saque concluído: no simulador o aviso diz que foi simulado", async () => {
   const real = await page();
   expect(real).toContain(`Saque de ${brl(15_000)} enviado para fornecedor@exemplo.com.`);
   expect(real).not.toContain("simulado");
+});
+
+it("remover webhook pelo painel: só o próprio; aviso na URL", async () => {
+  const [w] = await d
+    .insert(webhookEndpoints)
+    .values({ merchantId, url: "https://loja.example.com/h", secretEnc: "x", events: ["charge.paid"] })
+    .returning();
+  const outro = await newMerchant(d, 2);
+  const [alheio] = await d
+    .insert(webhookEndpoints)
+    .values({ merchantId: outro, url: "https://outra.example.com/h", secretEnc: "x", events: ["charge.paid"] })
+    .returning();
+  await expect(deleteWebhookAction(form({ id: alheio.id }))).rejects.toThrow("NEXT_REDIRECT /painel/integracoes?erro=remover");
+  await expect(deleteWebhookAction(form({ id: w.id }))).rejects.toThrow("NEXT_REDIRECT /painel/integracoes?ok=removido");
+  expect((await d.select().from(webhookEndpoints)).map((e) => e.id)).toEqual([alheio.id]);
 });
