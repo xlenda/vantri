@@ -243,10 +243,12 @@ describe("eventos fora do webhook do provedor: envio agendado na hora (after)", 
       .values({ endpointId: w.id, eventId: "evt_1", eventType: "charge.paid", payload: {}, status: "failed", attempts: 7 })
       .returning();
     await expect(resendDeliveryAction(form({ id: "6c0b1d3e-9f1a-4f7e-8a9b-1c2d3e4f5a6b" }))).rejects.toThrow(
-      "NEXT_REDIRECT /painel/integracoes?erro=reenviar",
+      "NEXT_REDIRECT /painel/integracoes/entregas?erro=reenviar",
     );
     expect(afterTasks).toHaveLength(0);
-    await expect(resendDeliveryAction(form({ id: dl.id }))).rejects.toThrow("NEXT_REDIRECT /painel/integracoes?ok=reenviada");
+    await expect(resendDeliveryAction(form({ id: dl.id }))).rejects.toThrow(
+      `NEXT_REDIRECT /painel/integracoes/entregas/${dl.id}?ok=reenviada`,
+    );
     expect((await d.select().from(webhookDeliveries))[0].status).toBe("pending");
     expect(afterTasks).toHaveLength(1);
   });
@@ -286,7 +288,7 @@ it("remover webhook pelo painel: só o próprio; aviso na URL", async () => {
     .insert(webhookEndpoints)
     .values({ merchantId: outro, url: "https://outra.example.com/h", secretEnc: "x", events: ["charge.paid"] })
     .returning();
-  await expect(deleteWebhookAction(form({ id: alheio.id }))).rejects.toThrow("NEXT_REDIRECT /painel/integracoes?erro=remover");
-  await expect(deleteWebhookAction(form({ id: w.id }))).rejects.toThrow("NEXT_REDIRECT /painel/integracoes?ok=removido");
+  await expect(deleteWebhookAction(form({ id: alheio.id }))).rejects.toThrow("NEXT_REDIRECT /painel/integracoes?aba=webhooks&erro=remover");
+  await expect(deleteWebhookAction(form({ id: w.id }))).rejects.toThrow("NEXT_REDIRECT /painel/integracoes?aba=webhooks&ok=removido");
   expect((await d.select().from(webhookEndpoints)).map((e) => e.id)).toEqual([alheio.id]);
 });
