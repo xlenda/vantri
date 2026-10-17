@@ -238,6 +238,8 @@ it("tick expires due charges", async () => {
     deleted_rate_limits: 0,
     deleted_sessions: 0,
     deleted_webhook_deliveries: 0,
+    deleted_access_logs: 0,
+    deleted_cron_runs: 0,
     errors: {},
   });
   const status = async (id: string) => (await d.select().from(charges).where(eq(charges.id, id)))[0].status;

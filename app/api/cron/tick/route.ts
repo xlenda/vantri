@@ -2,8 +2,9 @@ import { timingSafeEqual } from "node:crypto";
 import { and, eq, lt, or, sql } from "drizzle-orm";
 import { sha256Hex } from "@/lib/crypto";
 import { db } from "@/lib/db/client";
-import { rateLimits, sessions, webhookDeliveries } from "@/lib/db/schema";
+import { cronRuns, rateLimits, sessions, webhookDeliveries } from "@/lib/db/schema";
 import { logError } from "@/lib/log";
+import { deleteAccessLogsOlderThan6Months } from "@/lib/services/admin/access";
 import { expireDueCharges } from "@/lib/services/charges";
 import { pollProcessingPayouts } from "@/lib/services/payouts";
 import { dispatchDue } from "@/lib/webhooks/dispatch";
@@ -58,6 +59,22 @@ const STEPS = {
       ).length,
     error: "falha ao limpar entregas de webhook antigas",
   },
+  // Marco Civil, art. 15: o registro de acesso (IP + data/hora) fica guardado 6 meses; passou disso, sai.
+  deleted_access_logs: {
+    run: () => deleteAccessLogsOlderThan6Months(),
+    error: "falha ao limpar registros de acesso antigos",
+  },
+  // O próprio tick grava ~8 linhas por minuto em cron_runs; a tela de Saúde só lê a última de cada passo.
+  deleted_cron_runs: {
+    run: async () =>
+      (
+        await db()
+          .delete(cronRuns)
+          .where(lt(cronRuns.startedAt, sql`now() - interval '7 days'`))
+          .returning({ id: cronRuns.id })
+      ).length,
+    error: "falha ao limpar o histórico do cron",
+  },
 } as const;
 
 export async function GET(req: Request): Promise<Response> {
@@ -66,8 +83,10 @@ export async function GET(req: Request): Promise<Response> {
   }
   const result: Record<string, unknown> = {};
   const errors: Record<string, string> = {};
+  const runs: Array<typeof cronRuns.$inferInsert> = [];
   // Cada passo isolado: um que falha não pula os outros.
   for (const [name, step] of Object.entries(STEPS)) {
+    const startedAt = new Date();
     try {
       result[name] = await step.run();
     } catch (e) {
@@ -75,6 +94,13 @@ export async function GET(req: Request): Promise<Response> {
       result[name] = null;
       errors[name] = step.error;
     }
+    runs.push({ step: name, startedAt, finishedAt: new Date(), result: result[name], error: errors[name] ?? null });
+  }
+  // Histórico da tela de Saúde (o erro só como a categoria acima, nunca a mensagem crua). Falhar aqui não muda a resposta.
+  try {
+    await db().insert(cronRuns).values(runs);
+  } catch (e) {
+    logError("cron: falha ao gravar cron_runs", e);
   }
   return Response.json({ ...result, errors });
 }
