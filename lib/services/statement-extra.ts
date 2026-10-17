@@ -150,8 +150,11 @@ export async function dailyClosing(merchantId: string, fromDay: string, toDay: s
     throw new ApiError("invalid_request", "O período pode ter no máximo 366 dias.");
   }
 
-  // Dia civil de Brasília (UTC−3) pela subtração de 3h — sem a convenção de sinal POSIX do `at time zone`.
-  const day = sql<string>`to_char((${ledgerEntries.createdAt} - interval '3 hours')::date, 'YYYY-MM-DD')`;
+  // Dia civil de Brasília (UTC−3), mesmo idioma de summary.dailyFlow: converte para UTC (independe da sessão do
+  // banco — `::date` truncaria no TimeZone da sessão) e subtrai 3h.
+  const day = sql<string>`to_char((${ledgerEntries.createdAt} at time zone 'UTC') - interval '3 hours', 'YYYY-MM-DD')`;
+  // A identidade `net = inflow − outflow − fee + med` depende dos sinais canônicos do razão: cash_in/reversal ≥ 0;
+  // fee_in/fee_out/cash_out < 0; adjustment separado pelo próprio sinal; cada kind entra em exatamente uma categoria.
   const availKinds = (kinds: LedgerKind[], dir?: "in" | "out") =>
     sql`coalesce(sum(${ledgerEntries.amountCents}) filter (where ${ledgerEntries.bucket} = 'available' and ${inArray(ledgerEntries.kind, kinds)}${
       dir === "in" ? sql` and ${ledgerEntries.amountCents} >= 0` : dir === "out" ? sql` and ${ledgerEntries.amountCents} < 0` : sql``
