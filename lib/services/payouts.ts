@@ -1,6 +1,6 @@
-import { and, asc, desc, eq, isNull, lt, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import { z } from "zod";
-import { isValidCnpj, isValidCpf, normalizeDocument } from "@/lib/br/documents";
+import { isValidCnpj, isValidCpf, normalizeDocument, onlyDigits } from "@/lib/br/documents";
 import { sha256Hex } from "@/lib/crypto";
 import { db, type Tx } from "@/lib/db/client";
 import { merchants, payoutBatches, payouts } from "@/lib/db/schema";
@@ -250,10 +250,40 @@ export async function getPayout(merchantId: string, id: string): Promise<PayoutR
   return p ?? null;
 }
 
-/** Mais novos primeiro. `cursor` = id do último item da página anterior. */
+/**
+ * Busca do painel: chave Pix nas formas em que o lojista digita (a gravada é a normalizada: CPF/CNPJ sem pontuação,
+ * e-mail minúsculo, celular +55…) ou E2E exato. Igualdade, nunca LIKE: termo sem dígito não casa tudo. Vazio = sem filtro.
+ */
+function payoutSearch(q: string | undefined) {
+  const term = q?.trim();
+  if (!term) return undefined;
+  const d = onlyDigits(term);
+  const keys = [term, term.toLowerCase(), normalizeDocument(term), ...(d ? [`+55${d}`, `+${d}`] : [])];
+  return or(inArray(payouts.pixKey, [...new Set(keys)]), eq(payouts.endToEndId, term));
+}
+
+/** Contagem por status no histórico inteiro (não só a página), com a mesma busca da lista. */
+export async function countPayoutsByStatus(
+  merchantId: string,
+  q?: string,
+): Promise<Record<PayoutRow["status"] | "all", number>> {
+  const rows = await db()
+    .select({ status: payouts.status, n: count() })
+    .from(payouts)
+    .where(and(eq(payouts.merchantId, merchantId), payoutSearch(q)))
+    .groupBy(payouts.status);
+  const out = { all: 0, processing: 0, completed: 0, failed: 0 };
+  for (const r of rows) {
+    out[r.status] = r.n;
+    out.all += r.n;
+  }
+  return out;
+}
+
+/** Mais novos primeiro. `cursor` = id do último item da página anterior. `status` e `q` (chave/E2E) filtram. */
 export async function listPayouts(
   merchantId: string,
-  opts: { limit?: number; cursor?: string } = {},
+  opts: { limit?: number; cursor?: string; status?: PayoutRow["status"]; q?: string } = {},
 ): Promise<{ data: PayoutRow[]; nextCursor: string | null }> {
   const limit = Math.min(Math.max(Math.trunc(opts.limit ?? 20) || 20, 1), 100);
   if (opts.cursor !== undefined && !UUID.test(opts.cursor)) {
@@ -266,7 +296,14 @@ export async function listPayouts(
   const rows = await db()
     .select()
     .from(payouts)
-    .where(and(eq(payouts.merchantId, merchantId), after))
+    .where(
+      and(
+        eq(payouts.merchantId, merchantId),
+        opts.status ? eq(payouts.status, opts.status) : undefined,
+        payoutSearch(opts.q),
+        after,
+      ),
+    )
     .orderBy(desc(payouts.createdAt), desc(payouts.id))
     .limit(limit + 1);
   const data = rows.slice(0, limit);

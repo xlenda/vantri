@@ -3,8 +3,9 @@ import { totpCode } from "@/app/conta/acesso";
 import { requireUser } from "@/lib/auth/guards";
 import { verifyUserTotp } from "@/lib/auth/session";
 import type { Scope } from "@/lib/api/keys";
+import { maskDocument } from "@/lib/br/documents";
 import { brl } from "@/lib/br/money";
-import type { ledgerEntries } from "@/lib/db/schema";
+import type { ledgerEntries, payouts } from "@/lib/db/schema";
 import type { WebhookEventType } from "@/lib/services/events";
 
 // Apoio do painel do lojista (sem "use server": nada aqui vira endpoint de Server Action).
@@ -111,6 +112,43 @@ export const PIX_KEY_TYPES = [
   ["phone", "Celular"],
   ["evp", "Chave aleatória"],
 ] as const;
+
+/** Chave Pix na tela: CPF/CNPJ pelo maskDocument; e-mail, celular e aleatória só com as pontas. */
+export function maskPixKey(type: (typeof payouts.$inferSelect)["pixKeyType"], key: string): string {
+  switch (type) {
+    case "cpf":
+    case "cnpj":
+      return maskDocument(key);
+    case "email": {
+      const at = key.lastIndexOf("@");
+      return at > 0 ? `${key[0]}•••${key.slice(at)}` : "•••";
+    }
+    case "phone":
+      return key.length > 7 ? `${key.slice(0, 5)}•••••${key.slice(-2)}` : "•••";
+    case "evp":
+      return key.length > 12 ? `${key.slice(0, 8)}…${key.slice(-4)}` : "•••";
+  }
+}
+
+/** Código de falha do cash-out (os 12 do parceiro, mapa §1.14) → motivo em PT. A Cashyin mostra o código cru. */
+export const FAILURE_LABEL: Record<string, string> = {
+  pix_key_not_found: "Chave Pix não encontrada",
+  pix_key_invalid: "Chave Pix inválida",
+  pix_key_validation_failed: "Não foi possível validar a chave Pix",
+  recipient_bank_rejected: "Recusado pela instituição do favorecido",
+  recipient_account_invalid: "Conta do favorecido inválida ou encerrada",
+  amount_not_allowed: "Valor não permitido para esta transferência",
+  recipient_timeout: "A instituição do favorecido não respondeu a tempo",
+  returned_by_recipient: "Devolvido pelo favorecido",
+  temporarily_unavailable: "Pix temporariamente indisponível",
+  duplicate_request: "Transferência duplicada, recusada para não pagar em dobro",
+  under_review: "Retido para análise de segurança",
+  processing_failed: "Falha no processamento do Pix",
+};
+
+/** Motivo legível, sem ponto final; código ausente ou desconhecido não aparece cru (hasOwn: "constructor" não é motivo). */
+export const failureReason = (code: string | null) =>
+  code && Object.hasOwn(FAILURE_LABEL, code) ? FAILURE_LABEL[code] : "Não informado pelo banco";
 
 /** Celular digitado como "(11) 98765-4321" → "+5511987654321" (formato do DICT); o resto passa sem mexer. */
 export function phoneKey(s: string): string {

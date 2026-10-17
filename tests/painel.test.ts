@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { chargeInput, formInput, idInput, keyInput, payoutInput, webhookInput } from "@/app/painel/input";
-import { csvCell, phoneKey, rfc8187 } from "@/app/painel/lib";
+import { csvCell, FAILURE_LABEL, failureReason, maskPixKey, phoneKey, rfc8187 } from "@/app/painel/lib";
 import { attachmentsTooBig, MED_UPLOAD_MAX_BYTES } from "@/app/painel/med/limits";
 import { parseReais } from "@/lib/br/money";
 import { pixKeyProblem } from "@/lib/services/payouts";
@@ -103,6 +103,28 @@ it("pixKeyProblem (serviço de saque): formato por tipo", () => {
   expect(pixKeyProblem("phone", "+5511987654321")).toBeNull();
   expect(pixKeyProblem("phone", "11987654321")).toBe("Chave Pix inválida para o tipo phone.");
   expect(pixKeyProblem("evp", "not-a-uuid")).toBe("Chave Pix inválida para o tipo evp.");
+});
+
+it("FAILURE_LABEL: os 12 códigos de falha do cash-out em PT; desconhecido nunca sai cru", () => {
+  const codes = [
+    "pix_key_not_found", "pix_key_invalid", "pix_key_validation_failed", "recipient_bank_rejected",
+    "recipient_account_invalid", "amount_not_allowed", "recipient_timeout", "returned_by_recipient",
+    "temporarily_unavailable", "duplicate_request", "under_review", "processing_failed",
+  ];
+  expect(Object.keys(FAILURE_LABEL).sort()).toEqual([...codes].sort());
+  expect(FAILURE_LABEL.pix_key_not_found).toBe("Chave Pix não encontrada");
+  for (const c of codes) expect(failureReason(c)).toBe(FAILURE_LABEL[c]);
+  for (const c of [null, "", "codigo_novo", "constructor", "__proto__"]) {
+    expect(failureReason(c)).toBe("Não informado pelo banco");
+  }
+});
+
+it("maskPixKey: nenhuma chave aparece inteira", () => {
+  expect(maskPixKey("cpf", "52998224725")).toBe("***.982.247-**");
+  expect(maskPixKey("cnpj", "11222333000181")).toBe("11.222.333/****-**");
+  expect(maskPixKey("email", "falha@teste.com")).toBe("f•••@teste.com");
+  expect(maskPixKey("phone", "+5511987654321")).toBe("+5511•••••21");
+  expect(maskPixKey("evp", "123e4567-e89b-42d3-a456-426614174000")).toBe("123e4567…4000");
 });
 
 it("anexos do MED: 4 MB somados (menos folga do multipart)", () => {

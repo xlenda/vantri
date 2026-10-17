@@ -7,6 +7,7 @@ import { getBalance, postEntries } from "@/lib/money/ledger";
 import { simulator } from "@/lib/provider/simulator";
 import {
   applyPayoutResult,
+  countPayoutsByStatus,
   createPayout,
   findPayoutIdByProviderId,
   getPayout,
@@ -323,4 +324,38 @@ it("getPayout and listPayouts only see own payouts, with cursor", async () => {
   expect(p2.data.map((p) => p.id)).toEqual([ids[0]]);
   expect(p2.nextCursor).toBeNull();
   await expect(listPayouts(m, { cursor: "lixo" })).rejects.toMatchObject({ code: "invalid_request" });
+});
+
+it("listPayouts filters by status and key/E2E; countPayoutsByStatus counts the whole history, own only", async () => {
+  const m = await richMerchant(1);
+  const other = await richMerchant(2);
+  const cpf = (await createPayout(m, { ...BODY, amount: 1000 }, "chave-0001")).payout;
+  const phone = (await createPayout(m, { amount: 1000, pix_key: "+5511987654321", pix_key_type: "phone" }, "chave-0002")).payout;
+  const failed = (await createPayout(m, { amount: 1000, pix_key: "falha@teste.com", pix_key_type: "email" }, "chave-0003")).payout;
+  const pending = (await createPayout(m, { ...BODY, amount: 1000 }, "chave-0004")).payout;
+  await d.update(payouts).set({ status: "processing", endToEndId: null, completedAt: null }).where(eq(payouts.id, pending.id));
+  await createPayout(other, BODY, "chave-0001"); // mesma chave em outro lojista: nunca aparece nem conta
+
+  const ids = async (opts: Parameters<typeof listPayouts>[1]) => (await listPayouts(m, opts)).data.map((p) => p.id);
+  expect(await ids({ status: "completed" })).toEqual([phone.id, cpf.id]);
+  expect(await ids({ status: "failed" })).toEqual([failed.id]);
+  expect(await ids({ status: "processing" })).toEqual([pending.id]);
+  // Chave como o lojista digita (pontuada, celular com máscara, e-mail em maiúsculas) e o E2E exato.
+  expect(await ids({ q: "529.982.247-25" })).toEqual([pending.id, cpf.id]);
+  expect(await ids({ q: "(11) 98765-4321" })).toEqual([phone.id]);
+  expect(await ids({ q: " FALHA@Teste.com " })).toEqual([failed.id]);
+  expect(await ids({ q: phone.endToEndId! })).toEqual([phone.id]);
+  expect(await ids({ q: "529.982.247-25", status: "completed" })).toEqual([cpf.id]);
+  expect(await ids({ q: "nada" })).toEqual([]);
+  expect(await ids({ q: "  " })).toHaveLength(4); // termo vazio = sem filtro
+
+  // Cursor continua dentro do filtro.
+  const p1 = await listPayouts(m, { status: "completed", limit: 1 });
+  expect(p1.data.map((p) => p.id)).toEqual([phone.id]);
+  expect(await ids({ status: "completed", limit: 1, cursor: p1.nextCursor! })).toEqual([cpf.id]);
+
+  // Contadores do histórico inteiro (não da página), com a mesma busca da lista.
+  expect(await countPayoutsByStatus(m)).toEqual({ all: 4, processing: 1, completed: 2, failed: 1 });
+  expect(await countPayoutsByStatus(m, "529.982.247-25")).toEqual({ all: 2, processing: 1, completed: 1, failed: 0 });
+  expect(await countPayoutsByStatus(m, "nada")).toEqual({ all: 0, processing: 0, completed: 0, failed: 0 });
 });
