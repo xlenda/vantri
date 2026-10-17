@@ -65,7 +65,9 @@ export default async function EntregasPage({ searchParams }: { searchParams: Pro
         ? ["error", "O teste não foi entregue. Abra a primeira linha da lista para ver o motivo e a resposta do seu endpoint."]
         : sp.erro === "reenviar"
           ? ["error", "Não foi possível reenviar a entrega. Recarregue a página e tente de novo."]
-          : undefined;
+          : sp.erro === "endpoint-inativo"
+            ? ["error", "O endpoint desta entrega está desativado. Reative-o em Integrações antes de reenviar."]
+            : undefined;
   const filtered = !!(f.endpoint || f.status || f.from || f.to || f.q);
 
   return (

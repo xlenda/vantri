@@ -179,7 +179,7 @@ function Users({
               Conta da equipe: reset de 2FA, troca de senha e sessões de quem é da equipe só um administrador faz.
             </p>
           ) : (
-            <UserOpsForm key={sel.id} userId={sel.id} email={sel.email} />
+            <UserOpsForm key={sel.id} userId={sel.id} email={sel.email} merchant={sel.role === "merchant"} />
           )}
         </Panel>
       )}

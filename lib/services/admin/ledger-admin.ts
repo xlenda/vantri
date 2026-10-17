@@ -1,10 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
-import type { Tx } from "@/lib/db/client";
+import { db, type Tx } from "@/lib/db/client";
 import { ledgerEntries, payouts } from "@/lib/db/schema";
+import { logError } from "@/lib/log";
 import { getBalance, lockMerchant, postEntries } from "@/lib/money/ledger";
 import { emit } from "@/lib/services/events";
-import { toPayoutJson } from "@/lib/services/payouts";
+import { type PayoutRow, repollPayout, toPayoutJson } from "@/lib/services/payouts";
 import { writeAudit } from "./audit-util";
 
 // Movimento manual de dinheiro. Só a aprovação de quatro olhos (approvals.approve) chama, dentro da transação dela;
@@ -75,6 +76,42 @@ export async function reversiblePayout(tx: Tx, payoutId: string) {
   return p;
 }
 
+const PARTNER_SETTLED: Record<"completed" | "failed", string> = {
+  completed: "O parceiro concluiu este saque: não há o que estornar. Recuse o pedido.",
+  failed: "O parceiro recusou este saque e o estorno automático já devolveu o valor e a tarifa. Recuse o pedido.",
+};
+
+/**
+ * Antes de aprovar o estorno manual de um saque em processamento que o parceiro conhece (tem id lá): pergunta a ele
+ * (repollPayout, fora de transação). Concluído ou falho, vale o resultado dele e o manual para aqui. Ainda processando
+ * ou sem resposta: recusa, porque estornar agora pagaria duas vezes se ele concluir depois (applyPayoutResult só mexe
+ * em saque processing). Sem id no parceiro (o envio nunca foi confirmado), segue para o estorno.
+ * ponytail: saque sem id no parceiro pode ter chegado lá (resposta perdida); fechar isso pede consultar o parceiro
+ * pela chave de idempotência. E "não conheço este saque" do parceiro hoje é erro (recusa sempre): mapear para falha
+ * definitiva quando houver o parceiro de Pix real (requer parceiro).
+ */
+export async function settleWithPartnerFirst(payoutId: string, actorUserId: string): Promise<void> {
+  const [p] = await db()
+    .select({ status: payouts.status, providerPayoutId: payouts.providerPayoutId })
+    .from(payouts)
+    .where(eq(payouts.id, payoutId));
+  if (p?.status !== "processing" || !p.providerPayoutId) return;
+  let status: PayoutRow["status"];
+  try {
+    status = await repollPayout(payoutId, actorUserId);
+  } catch (e) {
+    logError("quatro olhos: parceiro não confirmou o saque antes do estorno", e, { payout: payoutId });
+    throw new ApprovalError("invalid_request", "Não foi possível confirmar o saque com o parceiro agora. Tente aprovar de novo em instantes.");
+  }
+  if (status === "processing") {
+    throw new ApprovalError(
+      "invalid_request",
+      "O parceiro ainda está processando este saque: estornar agora pagaria duas vezes se ele concluir. Consulte de novo mais tarde.",
+    );
+  }
+  throw new ApprovalError("invalid_request", PARTNER_SETTLED[status]);
+}
+
 /**
  * Saque em processamento que o parceiro não resolve (marca falho e avisa o lojista com payout.failed) ou com falha que
  * ficou sem estorno: devolve valor + tarifa ao disponível uma vez só. A chave é a do estorno automático
@@ -88,6 +125,11 @@ export async function reversePayoutManual(tx: Tx, payoutId: string, actorUserId:
   let [p] = await tx.select().from(payouts).where(eq(payouts.id, payoutId));
   const from = p.status;
   if (from === "completed") throw notReversible();
+  // Ganhou id no parceiro depois da consulta de settleWithPartnerFirst (um reenvio terminou no meio): agora só o
+  // resultado dele vale; estornar aqui pagaria duas vezes se ele concluir.
+  if (from === "processing" && p.providerPayoutId) {
+    throw new ApprovalError("invalid_request", "O saque chegou ao parceiro depois do pedido: consulte o resultado dele antes de estornar.");
+  }
   if (from === "processing") {
     [p] = await tx.update(payouts).set({ status: "failed" }).where(eq(payouts.id, payoutId)).returning();
     await emit(tx, p.merchantId, "payout.failed", toPayoutJson(p));

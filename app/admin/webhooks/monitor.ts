@@ -5,6 +5,7 @@ import { db } from "@/lib/db/client";
 import { merchants, webhookAttempts, webhookDeliveries, webhookEndpoints } from "@/lib/db/schema";
 import { writeAudit } from "@/lib/services/admin/audit-util";
 import { WEBHOOK_EVENT_TYPES, WebhookError } from "@/lib/services/events";
+import { failPendingDeliveries } from "@/lib/webhooks/dispatch";
 import { DAY_MS, dayStart } from "../format";
 import { PAGE_SIZE } from "../queries";
 
@@ -237,7 +238,10 @@ export async function resendFailedBatch(f: DeliveryFilters, actorUserId: string)
   });
 }
 
-/** Desliga o endpoint (novos eventos deixam de ser enfileirados para ele). Inexistente/id inválido → `not_found`. */
+/**
+ * Desliga o endpoint (novos eventos deixam de ser enfileirados para ele) e encerra como falha as entregas que ainda
+ * esperavam por ele. Inexistente/id inválido → `not_found`.
+ */
 export async function disableEndpoint(endpointId: string, actorUserId: string): Promise<void> {
   if (!isUuid(endpointId)) throw new WebhookError("not_found", "Webhook não encontrado.");
   await db().transaction(async (tx) => {
@@ -247,6 +251,7 @@ export async function disableEndpoint(endpointId: string, actorUserId: string): 
       .where(eq(webhookEndpoints.id, endpointId))
       .returning({ merchantId: webhookEndpoints.merchantId });
     if (!ep) throw new WebhookError("not_found", "Webhook não encontrado.");
+    await failPendingDeliveries(tx, endpointId);
     await writeAudit(tx, actorUserId, "webhook.endpoint_disable", { endpointId, merchantId: ep.merchantId });
   });
 }

@@ -3,7 +3,7 @@ import { z } from "zod";
 import { isValidCnpj, isValidCpf, normalizeDocument, onlyDigits } from "@/lib/br/documents";
 import { sha256Hex } from "@/lib/crypto";
 import { db, type Tx } from "@/lib/db/client";
-import { merchants, payoutBatches, payouts } from "@/lib/db/schema";
+import { merchants, payoutBatches, payouts, pendingApprovals } from "@/lib/db/schema";
 import { logError } from "@/lib/log";
 import { computeFee } from "@/lib/money/fees";
 import { getBalance, type LedgerEntry, lockMerchant, postEntries } from "@/lib/money/ledger";
@@ -311,6 +311,22 @@ export async function listPayouts(
   return { data, nextCursor: rows.length > limit ? data[data.length - 1].id : null };
 }
 
+/** Há pedido de estorno manual (quatro olhos) ainda sem decisão para este saque? */
+export async function hasPendingReversal(payoutId: string): Promise<boolean> {
+  const [a] = await db()
+    .select({ id: pendingApprovals.id })
+    .from(pendingApprovals)
+    .where(
+      and(
+        eq(pendingApprovals.kind, "payout_reversal"),
+        eq(pendingApprovals.status, "pending"),
+        sql`${pendingApprovals.payload}->>'payoutId' = ${payoutId}`,
+      ),
+    )
+    .limit(1);
+  return !!a;
+}
+
 /**
  * Um saque em processing: com id do provedor → getPayout; sem (a chamada original falhou) → reenvia com a mesma
  * chave de idempotência. Devolve o status depois. Saque já final: nada a fazer, nem auditoria. Cada consulta/reenvio
@@ -327,6 +343,8 @@ export async function repollPayout(payoutId: string, actorUserId: string | null 
   if (!r) throw new PayoutError("not_found", "Saque não encontrado.");
   const { payout: p, providerAccountId } = r;
   if (p.status !== "processing") return p.status;
+  // Reenviar com pedido de estorno pendente mandaria o dinheiro que o pedido quer devolver: o cron espera a decisão.
+  if (!p.providerPayoutId && (await hasPendingReversal(p.id))) return p.status;
   const provider = getProvider();
   if (p.providerPayoutId) await applyPayoutResult(p.id, await provider.getPayout(p.providerPayoutId));
   else if (providerAccountId) await submit(provider, p, providerAccountId);
@@ -619,6 +637,25 @@ export async function getBatch(merchantId: string, batchId: string): Promise<typ
     .from(payoutBatches)
     .where(and(eq(payoutBatches.id, batchId), eq(payoutBatches.merchantId, merchantId)));
   return b ?? null;
+}
+
+/**
+ * Lotes do lojista que não terminaram (parcial ou em andamento), os mais novos primeiro: a lista de saques linka de
+ * volta para o acompanhamento (/painel/saques/novo?lote=…), onde dá para retomar.
+ */
+export function listOpenBatches(merchantId: string, limit = 5) {
+  return db()
+    .select({
+      id: payoutBatches.id,
+      totalCents: payoutBatches.totalCents,
+      count: payoutBatches.count,
+      status: payoutBatches.status,
+      createdAt: payoutBatches.createdAt,
+    })
+    .from(payoutBatches)
+    .where(and(eq(payoutBatches.merchantId, merchantId), inArray(payoutBatches.status, ["partial", "processing"])))
+    .orderBy(desc(payoutBatches.createdAt))
+    .limit(limit);
 }
 
 /** Parcelas do lote (payouts), em ordem de índice. Lote de outro lojista → vazio. */

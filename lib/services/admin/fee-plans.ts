@@ -1,10 +1,10 @@
 import { and, asc, desc, eq, isNull } from "drizzle-orm";
 import { z } from "zod";
-import { db } from "@/lib/db/client";
+import { type Db, db } from "@/lib/db/client";
 import { feeHistory as feeHistoryTable, feePlans, users } from "@/lib/db/schema";
 import { computeFee } from "@/lib/money/fees";
 import { writeAudit } from "@/lib/services/admin/audit-util";
-import { updateFees } from "@/lib/services/merchants";
+import { type Fees, updateFees } from "@/lib/services/merchants";
 import { parseOr } from "@/lib/validation";
 
 // Planos de tarifa: modelo nomeado e reutilizável. Aplicar a um cliente passa por updateFees (mesma validação,
@@ -73,13 +73,24 @@ export async function archiveFeePlan(planId: string, actorUserId: string): Promi
   });
 }
 
-/** Copia as 4 taxas do plano para o cliente via updateFees; o fee_history guarda de qual plano veio. */
-export async function assignPlanToMerchant(merchantId: string, planId: string, actorUserId: string): Promise<void> {
-  const [p] = isUuid(planId) ? await db().select().from(feePlans).where(eq(feePlans.id, planId)) : [];
+/**
+ * As 4 taxas de um plano ativo. Arquivado, inexistente ou id malformado: not_found. Dentro de uma transação, passe-a
+ * em `d` (com uma conexão só, consultar fora dela esperaria por ela mesma).
+ */
+export async function activePlanFees(planId: string, d: Db = db()): Promise<Fees> {
+  const [p] = isUuid(planId) ? await d.select().from(feePlans).where(eq(feePlans.id, planId)) : [];
   if (!p || p.archivedAt) throw notFound();
-  // ponytail: arquivar no meio desta chamada não impede a aplicação; inofensivo, os valores do plano nunca mudam.
   const { feeInBps, feeInFixedCents, feeOutBps, feeOutFixedCents } = p;
-  await updateFees(merchantId, { feeInBps, feeInFixedCents, feeOutBps, feeOutFixedCents }, actorUserId, { planId: p.id });
+  return { feeInBps, feeInFixedCents, feeOutBps, feeOutFixedCents };
+}
+
+/**
+ * Copia as 4 taxas do plano para o cliente via updateFees; o fee_history guarda de qual plano veio. Cliente que está
+ * ou já esteve ativo: updateFees recusa (needs_approval) e quem chama pede a troca por quatro olhos (fee_change).
+ * ponytail: arquivar no meio desta chamada não impede a aplicação; inofensivo, os valores do plano nunca mudam.
+ */
+export async function assignPlanToMerchant(merchantId: string, planId: string, actorUserId: string): Promise<void> {
+  await updateFees(merchantId, await activePlanFees(planId), actorUserId, { planId });
 }
 
 /** Vigências do cliente, da mais nova para a mais antiga, com o nome do plano (se veio de um) e o e-mail do autor. */

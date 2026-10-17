@@ -14,6 +14,7 @@ import { auditLog, ledgerEntries, merchants, payouts, pendingApprovals, sessions
 import { getBalance, postEntries } from "@/lib/money/ledger";
 import { simulator } from "@/lib/provider/simulator";
 import { approve, requestApproval } from "@/lib/services/admin/approvals";
+import { reversePayoutManual } from "@/lib/services/admin/ledger-admin";
 import { listPayoutsOps, payoutDetail, payoutsCsvRows } from "@/lib/services/admin/payouts-ops";
 import { createPayout, pollProcessingPayouts, repollPayout } from "@/lib/services/payouts";
 import { createTestDb } from "./helpers/db";
@@ -121,6 +122,13 @@ async function payoutRow(merchantId: string, o: Partial<typeof payouts.$inferIns
 async function slowPayout(merchantId: string) {
   vi.spyOn(simulator, "createPayout").mockResolvedValueOnce({ providerPayoutId: `sim_po_lento_${++seq}`, status: "processing" });
   const { payout } = await createPayout(merchantId, BODY, `chave-${seq}`);
+  return payout;
+}
+
+/** Envio sem resposta do parceiro: debitado, em processamento e sem id lá (o caso do estorno manual). */
+async function lostPayout(merchantId: string) {
+  vi.spyOn(simulator, "createPayout").mockRejectedValueOnce(new Error("ECONNRESET"));
+  const { payout } = await createPayout(merchantId, BODY, `chave-${++seq}`);
   return payout;
 }
 
@@ -233,26 +241,20 @@ describe("listPayoutsOps, payoutDetail e exportação", () => {
   it("payoutDetail: linha do tempo do audit_log do saque, com pedido de quatro olhos e decisão; id inválido → null", async () => {
     vi.useRealTimers(); // a ordem vem do created_at do banco: com o Date parado, tudo empataria
     const m = await richMerchant();
-    const p = await slowPayout(m);
-    const other = await slowPayout(await richMerchant());
+    const p = await lostPayout(m);
+    const other = await lostPayout(await richMerchant());
     const [op, boss] = [await staff("operador"), await staff("admin")];
-    vi.spyOn(simulator, "getPayout").mockResolvedValue({ status: "processing" });
-    await repollPayout(p.id, op.id);
-    await repollPayout(other.id, op.id);
     const { id: approvalId } = await requestApproval("payout_reversal", { payoutId: p.id, reason: "Parceiro sem resposta" }, op.id);
+    await requestApproval("payout_reversal", { payoutId: other.id, reason: "Parceiro sem resposta" }, op.id);
     await approve(approvalId, boss.id);
 
     const det = await payoutDetail(p.id);
     expect(det?.payout.id).toBe(p.id);
     const [{ tradeName }] = await d.select({ tradeName: merchants.tradeName }).from(merchants).where(eq(merchants.id, m));
     expect(det?.tradeName).toBe(tradeName);
-    // Aprovação e efeito gravam na mesma transação (mesmo instante): a decisão vem antes do efeito.
-    expect(det?.events.map((e) => e.action)).toEqual([
-      "payout.repoll",
-      "approval.request",
-      "approval.approve",
-      "payout.force_fail",
-    ]);
+    // Aprovação e efeito gravam na mesma transação (mesmo instante): a decisão vem antes do efeito. O pedido do outro
+    // saque não aparece aqui.
+    expect(det?.events.map((e) => e.action)).toEqual(["approval.request", "approval.approve", "payout.force_fail"]);
     expect(det?.events[0].actorEmail).toBe(op.email);
     expect(await payoutDetail("nao-e-uuid")).toBeNull();
     expect(await payoutDetail(randomUUID())).toBeNull();
@@ -330,7 +332,7 @@ describe("telas e ações do /admin/saques", () => {
 
   it("marcar como falho e estornar cria pedido de quatro olhos e não estorna na hora", async () => {
     const m = await richMerchant();
-    const p = await slowPayout(m);
+    const p = await lostPayout(m);
     const before = await available(m);
     const op = await staff("operador");
 
@@ -365,6 +367,66 @@ describe("telas e ações do /admin/saques", () => {
     await approve(a.id, boss.id);
     expect((await row(p.id)).status).toBe("failed");
     expect(await available(m)).toBe(before + p.amountCents + p.feeCents);
+  });
+
+  it("com estorno pedido, o saque sem id no parceiro não é reenviado (cron nem tela); se ganhou id no meio, o estorno recusa", async () => {
+    const m = await richMerchant();
+    const p = await lostPayout(m);
+    const op = await staff("operador");
+    await requestApproval("payout_reversal", { payoutId: p.id, reason: "Parceiro sem resposta" }, op.id);
+    const send = vi.spyOn(simulator, "createPayout");
+    send.mockClear(); // o spy é o mesmo do lostPayout: só contam as chamadas daqui em diante
+    expect(await repollPayout(p.id)).toBe("processing"); // o cron espera a decisão do pedido
+    const boss = await staff("admin");
+    expect(await repollPayoutAction(undefined, form({ payoutId: p.id, code: await freshCode() }))).toEqual({
+      error: "Há um pedido de estorno deste saque em Aprovações: decida o pedido antes de reenviar.",
+    });
+    expect(send).not.toHaveBeenCalled();
+    // Corrida: um envio em voo terminou e gravou o id no parceiro entre a consulta e o estorno → recusa sob a trava.
+    await d.update(payouts).set({ providerPayoutId: "sim_po_corrida" }).where(eq(payouts.id, p.id));
+    await expect(d.transaction((tx) => reversePayoutManual(tx, p.id, boss.id))).rejects.toThrow(/chegou ao parceiro/);
+    expect((await row(p.id)).status).toBe("processing");
+    expect(await reversals()).toBe(0);
+  });
+
+  it("estorno manual de saque que o parceiro conhece: pergunta a ele antes; processando ou sem resposta recusa, concluído ou recusado vale o dele", async () => {
+    const m = await richMerchant();
+    const before = await available(m);
+    const [op, boss] = [await staff("operador"), await staff("admin")];
+    const ask = async (payoutId: string) =>
+      (await requestApproval("payout_reversal", { payoutId, reason: "Parceiro sem resposta" }, op.id)).id;
+    const statusOf = async (id: string) => (await d.select().from(pendingApprovals).where(eq(pendingApprovals.id, id)))[0].status;
+
+    const p = await slowPayout(m);
+    const a = await ask(p.id);
+    // Ainda processando lá: estornar agora pagaria duas vezes se ele concluir depois.
+    vi.spyOn(simulator, "getPayout").mockResolvedValueOnce({ status: "processing" });
+    await expect(approve(a, boss.id)).rejects.toThrow(/ainda está processando/);
+    // Sem resposta do parceiro: também recusa (não dá para saber).
+    vi.spyOn(simulator, "getPayout").mockRejectedValueOnce(new Error("ECONNRESET"));
+    await expect(approve(a, boss.id)).rejects.toThrow(/Não foi possível confirmar/);
+    expect((await row(p.id)).status).toBe("processing");
+    expect(await reversals()).toBe(0);
+    expect(await statusOf(a)).toBe("pending");
+    // Concluído lá: vale o dele (fecha como concluído), nada é estornado.
+    vi.spyOn(simulator, "getPayout").mockResolvedValueOnce({ status: "completed", endToEndId: "E2E_OK" });
+    await expect(approve(a, boss.id)).rejects.toThrow(/concluiu este saque/);
+    expect((await row(p.id)).status).toBe("completed");
+    expect(await reversals()).toBe(0);
+
+    expect(await available(m)).toBe(before - p.amountCents - p.feeCents); // o saque saiu: nada volta
+
+    // Recusado lá: o estorno automático devolve uma vez só; o manual não soma outro.
+    const m2 = await richMerchant();
+    const before2 = await available(m2);
+    const q = await slowPayout(m2);
+    const b = await ask(q.id);
+    vi.spyOn(simulator, "getPayout").mockResolvedValueOnce({ status: "failed", failureCode: "pix_key_not_found" });
+    await expect(approve(b, boss.id)).rejects.toThrow(/estorno automático já devolveu/);
+    expect((await row(q.id)).status).toBe("failed");
+    expect(await reversals()).toBe(1);
+    expect(await statusOf(b)).toBe("pending"); // o admin recusa o pedido
+    expect(await available(m2)).toBe(before2);
   });
 
   it("exportação: CSV com auditoria export.payouts e sem campo interno", async () => {

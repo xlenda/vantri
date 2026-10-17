@@ -164,6 +164,20 @@ it("2xx marks delivered", async () => {
   expect(verifySignature(ep.secret, body, headers.get("x-vantri-signature")!, sec(T0))).toBe(true);
 });
 
+it("endpoint desativado não recebe nem ocupa a vaga da rodada; reativado, a entrega pendente sai", async () => {
+  const { ep, delivery } = await setup();
+  await d.update(webhookEndpoints).set({ active: false }).where(eq(webhookEndpoints.id, ep.id));
+  const { send, calls } = stub(204);
+  // limit 1: se a entrega parada ocupasse a vaga, nunca sobraria rodada para as dos endpoints ativos.
+  expect(await dispatchDue(1, T0, send, publicDns)).toEqual({ delivered: 0, failed: 0 });
+  expect(calls).toHaveLength(0);
+  expect(await row(delivery.id)).toMatchObject({ status: "pending", attempts: 0, nextAttemptAt: T0 });
+
+  await d.update(webhookEndpoints).set({ active: true }).where(eq(webhookEndpoints.id, ep.id));
+  expect(await dispatchDue(1, T0, send, publicDns)).toEqual({ delivered: 1, failed: 0 });
+  expect(await row(delivery.id)).toMatchObject({ status: "delivered", attempts: 1 });
+});
+
 it("host that resolves to an internal IP is never sent to", async () => {
   const { delivery } = await setup();
   const { send, calls } = stub(200);

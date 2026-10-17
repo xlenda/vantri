@@ -27,26 +27,37 @@ function fail(e: unknown, approvalId: string): { error: string } {
   return { error: GENERIC_ERROR };
 }
 
-const decideForm = z.strictObject({ id: z.uuid(), op: z.enum(["approve", "reject"]), reason: z.string().max(500) });
+// approvalId, não "id": um campo "id" sobrescreve form.id no DOM e o React perde o "op" do botão clicado.
+const decideForm = z.strictObject({ approvalId: z.uuid(), op: z.enum(["approve", "reject"]), reason: z.string().max(500) });
 
 /** Aprovar (aplica o efeito na hora, numa transação só) ou recusar (com motivo; nada é aplicado). */
 export async function decideApprovalAction(_prev: FormState, fd: FormData): Promise<FormState> {
   const { user } = await requireAdmin({ perm: "quatro_olhos:aprovar" });
-  const input = decideForm.safeParse(formFields(fd, ["id", "op", "reason"]));
+  const input = decideForm.safeParse(formFields(fd, ["approvalId", "op", "reason"]));
   if (!input.success) return { error: "Pedido inválido." };
-  const { id, op, reason } = input.data;
+  const { approvalId: id, op, reason } = input.data;
   if (op === "reject" && !reasonSchema.safeParse(reason).success) {
     return { error: "Escreva o motivo da recusa (de 3 a 500 caracteres)." };
   }
   const totpProblem = await freshTotpProblem(user.id, fd);
   if (totpProblem) return { error: totpProblem };
+  // Saldo, taxa e status aparecem em várias telas do admin; a fila também.
+  const refresh = () => revalidatePath("/admin", "layout");
+  let result: { tempPassword?: string; email?: string } = {};
   try {
-    if (op === "approve") await approve(id, user.id);
+    if (op === "approve") result = await approve(id, user.id);
     else await reject(id, user.id, reason);
   } catch (e) {
+    refresh();
     return fail(e, id);
-  } finally {
-    revalidatePath("/admin", "layout"); // saldo, taxa e status aparecem em várias telas do admin; a fila também
   }
+  if (result.tempPassword) {
+    // Recuperação de acesso: a senha só existe nesta resposta (o banco guarda o hash). Sem revalidar: a fila
+    // recarregada tiraria este cartão da tela, e a senha sumiria junto antes de alguém ler.
+    return {
+      ok: `Pedido aprovado e aplicado. E-mail de acesso: ${result.email ?? "—"}. Senha temporária (aparece só agora): ${result.tempPassword}. Passe à pessoa por um canal seguro, nunca pelo mesmo canal do pedido; no próximo acesso ela troca a senha e configura o 2FA.`,
+    };
+  }
+  refresh();
   return op === "approve" ? { ok: "Pedido aprovado e aplicado." } : { ok: "Pedido recusado. Nada foi aplicado." };
 }

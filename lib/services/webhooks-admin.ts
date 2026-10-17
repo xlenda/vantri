@@ -1,4 +1,4 @@
-import { and, desc, eq, gte, inArray, sql } from "drizzle-orm";
+import { and, eq, gte, inArray, sql } from "drizzle-orm";
 import { encrypt, randomBase62 } from "@/lib/crypto";
 import { db } from "@/lib/db/client";
 import { webhookDeliveries, webhookEndpoints } from "@/lib/db/schema";
@@ -10,6 +10,7 @@ import {
   WebhookError,
   type WebhookEventType,
 } from "@/lib/services/events";
+import { failPendingDeliveries } from "@/lib/webhooks/dispatch";
 import { webhookUrlProblem } from "@/lib/webhooks/ssrf";
 
 // A tela importa a gestão de webhook de um lugar só: re-exporta o que já vive em events.ts (sem duplicar lógica).
@@ -68,14 +69,16 @@ export async function updateEndpoint(
 
 /** Liga/desliga o endpoint (desligado não recebe entregas — `enqueueEvent` já filtra `active`). Outro lojista → `not_found`. */
 export async function setEndpointActive(merchantId: string, id: string, active: boolean): Promise<void> {
-  const rows = UUID.test(id)
-    ? await db()
-        .update(webhookEndpoints)
-        .set({ active })
-        .where(and(eq(webhookEndpoints.id, id), eq(webhookEndpoints.merchantId, merchantId)))
-        .returning({ id: webhookEndpoints.id })
-    : [];
-  if (!rows.length) throw new WebhookError("not_found", "Webhook não encontrado.");
+  if (!UUID.test(id)) throw new WebhookError("not_found", "Webhook não encontrado.");
+  await db().transaction(async (tx) => {
+    const rows = await tx
+      .update(webhookEndpoints)
+      .set({ active })
+      .where(and(eq(webhookEndpoints.id, id), eq(webhookEndpoints.merchantId, merchantId)))
+      .returning({ id: webhookEndpoints.id });
+    if (!rows.length) throw new WebhookError("not_found", "Webhook não encontrado.");
+    if (!active) await failPendingDeliveries(tx, id);
+  });
 }
 
 /**

@@ -42,6 +42,17 @@ export async function enqueueEvent(tx: Tx, merchantId: string, type: WebhookEven
   );
 }
 
+/**
+ * Endpoint desativado: as entregas que ainda esperavam por ele terminam como falha, na transação da desativação.
+ * Nada fica parado na fila nem chega em massa se ele for reativado; o reenvio manual continua possível depois.
+ */
+export async function failPendingDeliveries(tx: Tx, endpointId: string): Promise<void> {
+  await tx
+    .update(webhookDeliveries)
+    .set({ status: "failed", lastError: "endpoint desativado" })
+    .where(and(eq(webhookDeliveries.endpointId, endpointId), eq(webhookDeliveries.status, "pending")));
+}
+
 export type Resolve = (host: string) => Promise<Array<{ address: string }>>;
 const dnsResolve: Resolve = (host) => lookup(host, { all: true }); // ordem padrão = verbatim
 
@@ -142,10 +153,19 @@ export async function dispatchDue(
   // Reserva atômica: um único UPDATE empurra next_attempt_at para now+LEASE (lease) nas linhas vencidas.
   // FOR UPDATE SKIP LOCKED faz uma rodada concorrente pular as linhas que esta está reservando, e depois do
   // commit elas já não estão vencidas. Se o processo morrer no meio, a entrega volta sozinha quando o lease vence.
+  // Endpoint desativado não recebe: as entregas dele ficam pending, paradas, e voltam se ele for reativado. O filtro
+  // fica aqui (e não só no UPDATE) para elas não ocuparem as `limit` vagas da rodada.
+  const activeEndpoints = db().select({ id: webhookEndpoints.id }).from(webhookEndpoints).where(eq(webhookEndpoints.active, true));
   const due = db()
     .select({ id: webhookDeliveries.id })
     .from(webhookDeliveries)
-    .where(and(eq(webhookDeliveries.status, "pending"), lte(webhookDeliveries.nextAttemptAt, now)))
+    .where(
+      and(
+        eq(webhookDeliveries.status, "pending"),
+        lte(webhookDeliveries.nextAttemptAt, now),
+        inArray(webhookDeliveries.endpointId, activeEndpoints),
+      ),
+    )
     .orderBy(asc(webhookDeliveries.nextAttemptAt))
     .limit(limit)
     .for("update", { skipLocked: true });

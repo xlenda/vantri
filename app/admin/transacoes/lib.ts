@@ -1,3 +1,4 @@
+import { maskPixKey } from "@/app/painel/lib";
 import { maskDocument } from "@/lib/br/documents";
 import { dateTime } from "@/lib/br/money";
 import { db } from "@/lib/db/client";
@@ -121,7 +122,8 @@ async function payoutsCsv(f: Extract<TxFilters, { tipo: "saques" }>, max: number
         reais(j.amount),
         reais(j.fee),
         KEY_TYPES[j.pix_key_type],
-        shownPixKey(j.pix_key_type, j.pix_key),
+        // Arquivo sai do sistema: chave do favorecido sempre mascarada (igual ao export de /admin/saques).
+        maskPixKey(j.pix_key_type, j.pix_key),
         j.description ?? "",
         STATUS_LABEL.saques[j.status],
         j.failure_code ?? "",

@@ -297,14 +297,14 @@ export async function resendDeliveryAction(fd: FormData): Promise<void> {
   const { merchant } = await painelSession();
   const input = formInput(idInput, fd);
   if (!input.success) redirect(`${ENTREGAS}?erro=reenviar`);
-  let ok = true;
+  let erro: string | null = null;
   try {
     await resendDelivery(merchant.id, input.data.id); // de outro lojista → not_found
   } catch (e) {
     if (!(e instanceof WebhookError)) logError("painel: reenviar webhook falhou", e, { merchant: merchant.id });
-    ok = false;
+    erro = e instanceof WebhookError && e.code === "invalid_request" ? "endpoint-inativo" : "reenviar";
   }
-  if (!ok) redirect(`${ENTREGAS}?erro=reenviar`);
+  if (erro) redirect(`${ENTREGAS}?erro=${erro}`);
   after(() => dispatchDue()); // a entrega sai agora, não no próximo tick do cron
   revalidatePath(PAGE);
   redirect(`${ENTREGAS}/${input.data.id}?ok=reenviada`);

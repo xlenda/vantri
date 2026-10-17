@@ -25,6 +25,8 @@ const NOTICE: Record<string, ["ok" | "error", string]> = {
   encerrada: ["ok", "Sessão encerrada. Aquele acesso vai precisar entrar de novo."],
   outras: ["ok", "Outras sessões encerradas. Só esta continua aberta."],
   encerrar: ["error", "Não foi possível encerrar a sessão. Recarregue a página e tente de novo."],
+  "2fa": ["ok", "App autenticador trocado. O app antigo não vale mais e as outras sessões foram encerradas."],
+  "2fa-expirado": ["error", "O QR code da troca venceu (10 minutos) ou não é desta sessão. Comece de novo; o app atual continua valendo."],
 };
 
 const SMALL_BUTTON = "!h-9 !px-3.5 text-xs";
@@ -97,8 +99,8 @@ export default async function ContaPage({ searchParams }: { searchParams: Promis
           <Card>
             <h3 className="text-base">Verificação em duas etapas</h3>
             <p className="mt-2 text-sm text-muted">
-              Trocou de celular ou de app autenticador? Confirme a senha e o código de agora para ler um QR code novo. As
-              outras sessões abertas são encerradas.
+              Trocou de celular ou de app autenticador? Confirme a senha e o código de agora para ler um QR code novo. O
+              app atual vale até o novo ser confirmado; aí as outras sessões abertas são encerradas.
             </p>
             <ActionForm action={reconfigureTotpAction} className="mt-4 space-y-4">
               <Input label="Senha atual" name="password" id="conta-senha" type="password" autoComplete="current-password" required maxLength={256} />

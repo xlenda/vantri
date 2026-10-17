@@ -4,7 +4,7 @@ import { beforeAll, beforeEach, expect, it } from "vitest";
 import { decrypt } from "@/lib/crypto";
 import { type Db, setDb } from "@/lib/db/client";
 import { webhookDeliveries, webhookEndpoints } from "@/lib/db/schema";
-import { createEndpoint, emit, type WebhookEventType } from "@/lib/services/events";
+import { createEndpoint, emit, resendDelivery, type WebhookEventType } from "@/lib/services/events";
 import {
   deliveryStats24h,
   endpointHealth,
@@ -116,6 +116,16 @@ it("setEndpointActive toggles; disable stops deliveries, enable resumes; other m
   await expect(setEndpointActive(other, ep.id, false)).rejects.toMatchObject({ code: "not_found" });
   await expect(setEndpointActive(m, "nao-e-uuid", false)).rejects.toMatchObject({ code: "not_found" });
   expect((await epRow(ep.id)).active).toBe(true);
+
+  // Desligar com entrega na fila: ela termina como falha (nada parado nem enxurrada na reativação).
+  await setEndpointActive(m, ep.id, false);
+  expect(await d.select({ status: webhookDeliveries.status, lastError: webhookDeliveries.lastError }).from(webhookDeliveries)).toEqual([
+    { status: "failed", lastError: "endpoint desativado" },
+  ]);
+  await expect(resendDelivery(m, (await d.select().from(webhookDeliveries))[0].id)).rejects.toMatchObject({
+    code: "invalid_request",
+    message: "O endpoint desta entrega está desativado. Reative-o antes de reenviar.",
+  });
 });
 
 it("rotateEndpointSecret changes stored secret, returns a new one once, and old signatures stop verifying", async () => {

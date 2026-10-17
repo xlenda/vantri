@@ -12,7 +12,7 @@ import { writeAudit } from "./audit-util";
 
 export class UserAdminError extends Error {
   constructor(
-    public readonly code: "not_found" | "forbidden" | "last_admin",
+    public readonly code: "not_found" | "forbidden" | "last_admin" | "needs_approval",
     message: string,
   ) {
     super(message);
@@ -89,23 +89,48 @@ type Patch = Partial<
   >
 >;
 
+const TAKEOVER_TAIL = {
+  merchant: " Para recuperar senha e 2FA juntos, use “Pedir recuperação de acesso”: outro administrador aprova e recebe a senha.",
+  admin: " Conta da equipe: se a pessoa perdeu a senha e o app, crie outra conta para ela e tire o papel desta.",
+};
+
 /**
  * Uma operação na conta: confere o alvo, aplica `patch`, derruba as sessões (se `drop`) e audita, numa transação.
  * Conta da equipe só com `equipe:gerir` do autor: sem isso, um suporte trocaria a senha e o 2FA de um admin e
- * entraria no lugar dele. A regra fica aqui para valer em qualquer chamador.
+ * entraria no lugar dele. Senha nova numa conta sem 2FA, ou 2FA zerado com senha temporária pendente, entregaria a
+ * conta inteira a quem opera (entra com a senha que viu e cadastra o próprio 2FA): needs_approval, vale para
+ * qualquer papel. A linha do alvo fica travada: duas operações ao mesmo tempo não passam as duas pela regra.
  */
 async function operate(targetUserId: string, actorUserId: string, action: string, patch: Patch | null, drop: boolean) {
   await db().transaction(async (tx) => {
     const [t] = await tx
-      .select({ role: users.role, merchantId: users.merchantId })
+      .select({
+        role: users.role,
+        merchantId: users.merchantId,
+        totpEnabled: users.totpEnabled,
+        mustChangePassword: users.mustChangePassword,
+      })
       .from(users)
-      .where(eq(users.id, targetUserId));
+      .where(eq(users.id, targetUserId))
+      .for("update");
     if (!t) throw new UserAdminError("not_found", "Usuário não encontrado.");
     if (t.role === "admin") {
       const [a] = await tx.select({ adminRole: users.adminRole }).from(users).where(eq(users.id, actorUserId));
       if (!pode(a?.adminRole ?? null, "equipe:gerir")) {
         throw new UserAdminError("forbidden", "Conta da equipe: só quem gere a equipe opera.");
       }
+    }
+    if (action === "user.force_password" && !t.totpEnabled) {
+      throw new UserAdminError(
+        "needs_approval",
+        `Esta conta está sem 2FA: com uma senha nova, quem opera entraria e cadastraria o próprio 2FA.${TAKEOVER_TAIL[t.role]}`,
+      );
+    }
+    if (action === "user.reset_2fa" && t.mustChangePassword) {
+      throw new UserAdminError(
+        "needs_approval",
+        `Esta conta tem uma senha temporária pendente: com o 2FA zerado, quem viu a senha entraria e cadastraria o próprio 2FA.${TAKEOVER_TAIL[t.role]}`,
+      );
     }
     if (patch) await tx.update(users).set(patch).where(eq(users.id, targetUserId));
     if (drop) await tx.delete(sessions).where(eq(sessions.userId, targetUserId));
@@ -119,10 +144,14 @@ export function reset2fa(targetUserId: string, actorUserId: string): Promise<voi
   return operate(targetUserId, actorUserId, "user.reset_2fa", patch, true);
 }
 
-/** Senha temporária nova (troca obrigatória no próximo acesso). Ela só existe no retorno: o banco guarda o hash. */
+/**
+ * Senha temporária nova (troca obrigatória no próximo acesso). Ela só existe no retorno: o banco guarda o hash.
+ * O argon2 roda antes, fora da transação (não segura a conexão nem a trava da linha); um pedido que as regras recusam
+ * gasta esse hash à toa, mas cada tentativa já custou um código 2FA novo de quem opera.
+ */
 export async function forcePasswordChange(targetUserId: string, actorUserId: string): Promise<{ tempPassword: string }> {
   const tempPassword = randomBase62(16);
-  const passwordHash = await hashPassword(tempPassword); // argon2 fora da transação: não segura a conexão
+  const passwordHash = await hashPassword(tempPassword);
   await operate(targetUserId, actorUserId, "user.force_password", { passwordHash, mustChangePassword: true }, true);
   return { tempPassword };
 }

@@ -83,7 +83,8 @@ export const sessions = pgTable("sessions", {
 });
 
 // Marco Civil da Internet, art. 15: registros de acesso (IP + data/hora) guardados por no mínimo 6 meses.
-// Nada apaga por enquanto, nem o logout nem o cron (Ruling 30): o prazo de retenção é decisão do advogado.
+// O logout não apaga; o cron apaga só o que passou de 6 meses (deleteAccessLogsOlderThan6Months, no tick). Ofício de
+// preservação pede exportar antes ou pausar a limpeza.
 export const accessLogs = pgTable("access_logs", {
   id: id(),
   userId: uuid("user_id").references(() => users.id, { onDelete: "set null" }),
@@ -353,8 +354,10 @@ export const pendingApprovals = pgTable(
   "pending_approvals",
   {
     id: id(),
+    // Enum só do TypeScript (text sem CHECK no banco): tipo novo não pede migração. account_recovery = senha
+    // temporária nova + 2FA zerado na mesma conta de lojista (só por quatro olhos).
     kind: text("kind", {
-      enum: ["balance_adjustment", "payout_reversal", "fee_change", "merchant_reactivate"],
+      enum: ["balance_adjustment", "payout_reversal", "fee_change", "merchant_reactivate", "account_recovery"],
     }).notNull(),
     merchantId: uuid("merchant_id")
       .notNull()

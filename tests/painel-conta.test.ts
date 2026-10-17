@@ -3,22 +3,44 @@ import { eq } from "drizzle-orm";
 import { generate } from "otplib";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { reconfigureTotpAction, revokeOthersAction, revokeSessionAction } from "@/app/painel/conta/actions";
+import TrocarTotpPage from "@/app/painel/conta/2fa/page";
+import {
+  confirmTotpRotationAction,
+  reconfigureTotpAction,
+  revokeOthersAction,
+  revokeSessionAction,
+} from "@/app/painel/conta/actions";
 import ContaPage from "@/app/painel/conta/page";
+import { TOTP_ROTATION_COOKIE } from "@/app/painel/conta/rotation";
 import { hashPassword } from "@/lib/auth/password";
-import { beginTotpSetup, confirmTotpSetup, resolveSession, verifyUserTotp } from "@/lib/auth/session";
+import { beginTotpSetup, pendingTotpSecret, verifyUserTotp } from "@/lib/auth/session";
 import { encrypt, sha256Hex } from "@/lib/crypto";
 import { type Db, setDb } from "@/lib/db/client";
 import { merchants, sessions, users } from "@/lib/db/schema";
 import { createTestDb } from "./helpers/db";
 import { newMerchant } from "./helpers/factories";
 
-// Guarda de verdade (requireUser → checkAccess no banco) e 2FA de verdade; só o cookie da requisição é simulado.
-// redirect/notFound lançam como os reais.
-const jar = vi.hoisted(() => ({ token: undefined as string | undefined }));
+// Guarda de verdade (requireUser → checkAccess no banco) e 2FA de verdade; só os cookies da requisição são simulados
+// (o de sessão e os que as actions gravam). redirect/notFound lançam como os reais.
+const jar = vi.hoisted(() => ({
+  token: undefined as string | undefined,
+  extra: new Map<string, string>(),
+  opts: undefined as unknown,
+}));
 vi.mock("next/headers", () => ({
   cookies: async () => ({
-    get: (name: string) => (name === "vantri_session" && jar.token ? { name, value: jar.token } : undefined),
+    get: (name: string) => {
+      if (name === "vantri_session") return jar.token ? { name, value: jar.token } : undefined;
+      const value = jar.extra.get(name);
+      return value === undefined ? undefined : { name, value };
+    },
+    set: (name: string, value: string, opts: unknown) => {
+      jar.extra.set(name, value);
+      jar.opts = opts;
+    },
+    delete: (o: string | { name: string }) => {
+      jar.extra.delete(typeof o === "string" ? o : o.name);
+    },
   }),
 }));
 vi.mock("next/navigation", () => ({
@@ -83,6 +105,8 @@ beforeEach(async () => {
   userId = await newUser(1);
   await newSession(userId, CURRENT);
   jar.token = CURRENT;
+  jar.extra.clear();
+  jar.opts = undefined;
 });
 
 afterEach(() => {
@@ -127,24 +151,67 @@ describe("reconfigurar 2FA (reconfigureTotpAction)", () => {
     expect(await sessionIds()).toContain(outra);
   });
 
-  it("senha e código atuais: desliga o 2FA, encerra as outras sessões e o /conta/2fa religa com o QR novo", async () => {
+  it("senha e código atuais: nada desliga; o QR novo fica pendente nesta sessão e só o código dele troca o segredo", async () => {
+    const before = await me();
     const outra = await newSession(userId, "tok-celular");
     const alheio = await newUser(2);
     const sessaoAlheia = await newSession(alheio, "tok-de-outra-loja");
+    const sid = sha256Hex(CURRENT);
 
     await expect(reconfigureTotpAction(undefined, form({ password: PASS, code: await codeAt(0) }))).rejects.toThrow(
-      /^NEXT_REDIRECT \/conta\/2fa$/,
+      /^NEXT_REDIRECT \/painel\/conta\/2fa$/,
     );
-    expect(await me()).toMatchObject({ totpEnabled: false, totpSecretEnc: null, totpLastStep: null });
-    expect(await sessionIds()).toEqual([sha256Hex(CURRENT), sessaoAlheia].sort());
-    expect(await sessionIds()).not.toContain(outra);
-    expect((await resolveSession(CURRENT))?.session.mfaPassed).toBe(true);
+    // Nenhum instante sem 2FA: mesmo segredo ligado, sessões intactas, e quem souber a senha não cadastra o próprio.
+    expect(await me()).toMatchObject({ totpEnabled: true, totpSecretEnc: before.totpSecretEnc });
+    expect(await sessionIds()).toContain(outra);
+    await expect(beginTotpSetup(userId)).rejects.toThrow(/2FA/);
+    // O segredo novo vai cifrado num cookie httpOnly só de /painel/conta, preso a este usuário e a esta sessão.
+    const pending = jar.extra.get(TOTP_ROTATION_COOKIE);
+    expect(jar.opts).toMatchObject({ httpOnly: true, sameSite: "strict", path: "/painel/conta", maxAge: 600 });
+    const secret = pendingTotpSecret(userId, sid, pending);
+    if (!secret) throw new Error("segredo pendente ausente");
+    expect(pending).not.toContain(secret);
+    expect(pendingTotpSecret(userId, sha256Hex("tok-celular"), pending)).toBeNull(); // outra sessão
+    expect(pendingTotpSecret(alheio, sid, pending)).toBeNull(); // outro usuário
+    const [v, iv, tag, ct] = (pending ?? "").split(":");
+    expect(pendingTotpSecret(userId, sid, `${v}:${iv}:${tag[0] === "A" ? "B" : "A"}${tag.slice(1)}:${ct}`)).toBeNull(); // adulterado
+    expect(renderToStaticMarkup(await TrocarTotpPage())).toContain(secret.slice(0, 4));
 
-    // O que o /conta/2fa faz: segredo novo + confirmação com um código dele (pode ser no mesmo passo de 30 s).
-    const { secret } = await beginTotpSetup(userId);
-    expect(await confirmTotpSetup(userId, await codeAt(0, secret), CURRENT)).toBe(true);
-    expect((await me()).totpEnabled).toBe(true);
+    // Código do app antigo não confirma o novo.
+    expect(await confirmTotpRotationAction(undefined, form({ code: await codeAt(1) }))).toMatchObject({
+      error: expect.stringMatching(/^Código inválido/),
+    });
+    expect((await me()).totpSecretEnc).toBe(before.totpSecretEnc);
+
+    // Código do app novo: troca numa instrução só, apaga o cookie e encerra as outras sessões desta conta.
+    await expect(confirmTotpRotationAction(undefined, form({ code: await codeAt(0, secret) }))).rejects.toThrow(
+      /^NEXT_REDIRECT \/painel\/conta\?ok=2fa$/,
+    );
+    expect(await me()).toMatchObject({ totpEnabled: true });
+    expect((await me()).totpSecretEnc).not.toBe(before.totpSecretEnc);
+    expect(jar.extra.has(TOTP_ROTATION_COOKIE)).toBe(false);
+    expect(await sessionIds()).toEqual([sid, sessaoAlheia].sort());
     expect(await verifyUserTotp(userId, await codeAt(1))).toBe(false); // o app antigo não vale mais
+    expect(await verifyUserTotp(userId, await codeAt(1, secret))).toBe(true); // o novo vale
+    expect(await verifyUserTotp(userId, await codeAt(0, secret))).toBe(false); // o código da confirmação não serve de novo
+  });
+
+  it("QR vencido (10 min) ou sem cookie: nada muda e a tela volta para Minha conta", async () => {
+    const before = await me();
+    await expect(reconfigureTotpAction(undefined, form({ password: PASS, code: await codeAt(0) }))).rejects.toThrow(
+      "NEXT_REDIRECT /painel/conta/2fa",
+    );
+    const secret = pendingTotpSecret(userId, sha256Hex(CURRENT), jar.extra.get(TOTP_ROTATION_COOKIE));
+    if (!secret) throw new Error("segredo pendente ausente");
+    vi.setSystemTime((NOW + 601) * 1000);
+    await expect(TrocarTotpPage()).rejects.toThrow("NEXT_REDIRECT /painel/conta?erro=2fa-expirado");
+    expect(await confirmTotpRotationAction(undefined, form({ code: await generate({ secret, epoch: NOW + 601 }) }))).toMatchObject({
+      error: expect.stringMatching(/^Código inválido/),
+    });
+    expect((await me()).totpSecretEnc).toBe(before.totpSecretEnc);
+    jar.extra.clear();
+    vi.setSystemTime(NOW * 1000);
+    await expect(TrocarTotpPage()).rejects.toThrow("NEXT_REDIRECT /painel/conta?erro=2fa-expirado");
   });
 
   it("sem sessão nada muda", async () => {

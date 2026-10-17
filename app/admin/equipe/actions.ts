@@ -11,6 +11,7 @@ import type { AdminRole } from "@/lib/auth/perms";
 import { logError } from "@/lib/log";
 import { setAdminRole } from "@/lib/services/admin/roles";
 import { dropSessions, forcePasswordChange, reset2fa, unlock, UserAdminError } from "@/lib/services/admin/users-admin";
+import { askApproval } from "../approval-request";
 import { formFields } from "../format";
 
 // Toda ação aqui muda acesso: permissão no servidor (requireAdmin) e código 2FA novo (anti-replay), nessa ordem,
@@ -56,17 +57,33 @@ const DONE = {
   sessoes: "Sessões encerradas. A pessoa precisa entrar de novo.",
   desbloquear: "Acesso desbloqueado.",
 };
-const opForm = z.strictObject({ userId: z.uuid(), op: z.enum(["reset2fa", "senha", "sessoes", "desbloquear"]) });
+const opForm = z.strictObject({
+  userId: z.uuid(),
+  op: z.enum(["reset2fa", "senha", "sessoes", "desbloquear", "recuperar"]),
+  reason: z.string().max(500),
+});
 
 /**
  * Reset de 2FA, troca de senha forçada, derrubar sessões, desbloquear. A senha temporária só existe nesta resposta
  * (o banco guarda o hash). Conta da equipe exige também equipe:gerir: o serviço confere e aqui vira notFound().
+ * Senha e 2FA juntos na mesma conta (tomada de conta) o serviço recusa; "recuperar" pede isso por quatro olhos e a
+ * senha sai só para quem aprovar.
  */
 export async function userOpAction(_prev: UserOpState, fd: FormData): Promise<UserOpState> {
   const { user } = await requireAdmin({ perm: "usuarios:operar" });
-  const input = opForm.safeParse(formFields(fd, ["userId", "op"]));
+  const input = opForm.safeParse(formFields(fd, ["userId", "op", "reason"]));
   if (!input.success) return { error: "Pedido inválido." };
-  const { userId, op } = input.data;
+  const { userId, op, reason } = input.data;
+  if (op === "recuperar") {
+    return askApproval(
+      user.id,
+      fd,
+      "account_recovery",
+      { userId, reason },
+      "Pedido de recuperação enviado. Quando outro administrador aprovar em Aprovações, a senha temporária aparece para ele, que a passa à pessoa por um canal seguro.",
+      { user: userId },
+    );
+  }
   const totpProblem = await freshTotpProblem(user.id, fd);
   if (totpProblem) return { error: totpProblem };
   let tempPassword: string | undefined;

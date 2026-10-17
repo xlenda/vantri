@@ -1,25 +1,13 @@
 "use server";
 
-import { eq } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
-import { notFound } from "next/navigation";
 import { z } from "zod";
 import type { FormState } from "@/app/components/ui/action-form";
 import { GENERIC_ERROR } from "@/app/conta/acesso";
-import { freshTotpProblem } from "@/app/painel/lib";
 import { requireAdmin } from "@/lib/auth/guards";
 import { parseReais } from "@/lib/br/money";
-import { db } from "@/lib/db/client";
-import { merchants } from "@/lib/db/schema";
 import { logError } from "@/lib/log";
-import {
-  ApprovalError,
-  type ApprovalKind,
-  feeChangeNeedsApproval,
-  MAX_ADJUSTMENT_CENTS,
-  reasonSchema,
-  requestApproval,
-} from "@/lib/services/admin/approvals";
+import { MAX_ADJUSTMENT_CENTS } from "@/lib/services/admin/approvals";
 import {
   adminCreateMerchant,
   approveMerchant,
@@ -29,6 +17,7 @@ import {
   suspendMerchant,
   updateFees,
 } from "@/lib/services/merchants";
+import { askApproval } from "../approval-request";
 import { formFields, parsePercent } from "../format";
 
 const MERCHANT_ERRORS: Record<MerchantErrorCode, string> = {
@@ -45,6 +34,7 @@ const MERCHANT_ERRORS: Record<MerchantErrorCode, string> = {
   not_found: "Cliente não encontrado.",
   invalid_status: "Ação não permitida no status atual do cliente.",
   provider_error: "Não foi possível abrir a conta no parceiro. Tente de novo.",
+  needs_approval: "Cliente ativo: a mudança de taxa precisa de quatro olhos. Recarregue a página e peça com motivo e código.",
 };
 
 /** Erro do serviço → mensagem em PT. A causa (do parceiro ou do banco) vai só para o log. */
@@ -53,37 +43,8 @@ function fail(e: unknown, context: string, ids: Record<string, string> = {}): { 
     if (e.code === "provider_error") logError(context, e.cause, ids);
     return { error: MERCHANT_ERRORS[e.code] };
   }
-  if (e instanceof ApprovalError) {
-    if (e.code === "forbidden") notFound(); // o serviço barrou o papel: mesma resposta do requireAdmin
-    return { error: e.message };
-  }
   logError(context, e, ids);
   return { error: GENERIC_ERROR };
-}
-
-const APPROVALS = "/admin/aprovacoes";
-
-/**
- * Quatro olhos: motivo → código 2FA novo (anti-replay) → pedido. Nada muda aqui: o efeito só acontece quando outro
- * administrador aprovar em Aprovações. Motivo malformado não gasta o código.
- */
-async function askApproval(
-  userId: string,
-  fd: FormData,
-  kind: ApprovalKind,
-  input: { merchantId: string; reason: string } & Record<string, unknown>,
-  done: string,
-): Promise<FormState> {
-  if (!reasonSchema.safeParse(input.reason).success) return { error: "Escreva o motivo (de 3 a 500 caracteres)." };
-  const totpProblem = await freshTotpProblem(userId, fd);
-  if (totpProblem) return { error: totpProblem };
-  try {
-    await requestApproval(kind, input, userId);
-  } catch (e) {
-    return fail(e, `admin: falha ao pedir aprovação (${kind})`, { merchant: input.merchantId });
-  }
-  revalidatePath(APPROVALS);
-  return { ok: done };
 }
 
 const CREATE_FIELDS = ["legalName", "tradeName", "documentType", "document", "segment", "email"] as const;
@@ -123,7 +84,8 @@ const feesForm = z.strictObject({
 
 /**
  * Taxas digitadas em % (até 2 casas) e R$; gravadas em pontos-base e centavos. Cliente que está ou já esteve ativo
- * (os termos prometem aviso de 30 dias) vira pedido de quatro olhos, com motivo e código 2FA; o resto muda na hora.
+ * (os termos prometem aviso de 30 dias): updateFees recusa a mudança direta (needs_approval, decidido no banco, sem
+ * corrida com a aprovação do cliente) e ela vira pedido de quatro olhos, com motivo e código 2FA; o resto muda na hora.
  */
 export async function updateFeesAction(_prev: FormState, fd: FormData): Promise<FormState> {
   const { user } = await requireAdmin({ perm: "taxas:editar" });
@@ -142,22 +104,19 @@ export async function updateFeesAction(_prev: FormState, fd: FormData): Promise<
   const [feeInFixedCents, feeOutFixedCents] = cents as number[];
   const fees = { feeInBps, feeInFixedCents, feeOutBps, feeOutFixedCents };
 
-  const [m] = await db()
-    .select({ status: merchants.status, approvedAt: merchants.approvedAt })
-    .from(merchants)
-    .where(eq(merchants.id, f.merchantId));
-  if (m && feeChangeNeedsApproval(m)) {
-    return askApproval(
-      user.id,
-      fd,
-      "fee_change",
-      { merchantId: f.merchantId, ...fees, reason: f.reason },
-      "Pedido de mudança de taxa enviado. As taxas só mudam quando outro administrador aprovar em Aprovações.",
-    );
-  }
   try {
     await updateFees(f.merchantId, fees, user.id);
   } catch (e) {
+    if (e instanceof MerchantError && e.code === "needs_approval") {
+      return askApproval(
+        user.id,
+        fd,
+        "fee_change",
+        { merchantId: f.merchantId, ...fees, reason: f.reason },
+        "Pedido de mudança de taxa enviado. As taxas só mudam quando outro administrador aprovar em Aprovações.",
+        { merchant: f.merchantId },
+      );
+    }
     return fail(e, "admin: falha ao atualizar taxas", { merchant: f.merchantId });
   }
   revalidatePath(`/admin/clientes/${f.merchantId}`);
@@ -187,6 +146,7 @@ export async function requestBalanceAdjustmentAction(_prev: FormState, fd: FormD
     "balance_adjustment",
     { merchantId, amountCents: direction === "debito" ? -cents : cents, reason },
     "Pedido de ajuste enviado. O saldo só muda quando outro administrador aprovar em Aprovações.",
+    { merchant: merchantId },
   );
 }
 
@@ -220,6 +180,7 @@ export async function merchantStatusAction(_prev: FormState, fd: FormData): Prom
       "merchant_reactivate",
       { merchantId, reason },
       "Pedido de reativação enviado. O cliente só volta a ativo quando outro administrador aprovar em Aprovações.",
+      { merchant: merchantId },
     );
   }
 

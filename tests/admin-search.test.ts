@@ -347,7 +347,8 @@ describe("/admin/busca", () => {
     const html = renderToStaticMarkup(await page({ q: E2E }));
     expect(html).toContain("Histórico operacional");
     expect(html).not.toContain("/admin/busca/export");
-    expect(html).not.toContain(`/admin/saques/${p.id}`);
+    // /admin/saques/[id] abre com transacoes:ler (o suporte lê; as ações de saque pedem mais): o link aparece.
+    expect(html).toContain(`/admin/saques/${p.id}`);
     expect(renderToStaticMarkup(await page({ q: "evt_ana_0001" }))).not.toContain(`/admin/webhooks/${w.id}`);
 
     auth.user = { ...auth.user!, adminRole: null };

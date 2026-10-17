@@ -99,16 +99,23 @@ export async function listDeliveryAttempts(merchantId: string, deliveryId: strin
 
 /** Volta a entrega para `pending` agora. Entrega de outro lojista (ou id inválido) → `not_found`. */
 export async function resendDelivery(merchantId: string, deliveryId: string): Promise<void> {
-  const own = db()
-    .select({ id: webhookEndpoints.id })
-    .from(webhookEndpoints)
-    .where(eq(webhookEndpoints.merchantId, merchantId));
-  const updated = UUID.test(deliveryId)
-    ? await db()
-        .update(webhookDeliveries)
-        .set({ status: "pending", nextAttemptAt: new Date() })
-        .where(and(eq(webhookDeliveries.id, deliveryId), inArray(webhookDeliveries.endpointId, own)))
-        .returning({ id: webhookDeliveries.id })
-    : [];
-  if (!updated.length) throw new WebhookError("not_found", "Entrega não encontrada.");
+  const own = (active?: boolean) =>
+    db()
+      .select({ id: webhookEndpoints.id })
+      .from(webhookEndpoints)
+      .where(and(eq(webhookEndpoints.merchantId, merchantId), active ? eq(webhookEndpoints.active, true) : undefined));
+  if (!UUID.test(deliveryId)) throw new WebhookError("not_found", "Entrega não encontrada.");
+  // Só endpoint ativo: o dispatcher não envia para desativado, e "reenviada" sem envio seria mentira.
+  const updated = await db()
+    .update(webhookDeliveries)
+    .set({ status: "pending", nextAttemptAt: new Date() })
+    .where(and(eq(webhookDeliveries.id, deliveryId), inArray(webhookDeliveries.endpointId, own(true))))
+    .returning({ id: webhookDeliveries.id });
+  if (updated.length) return;
+  const [mine] = await db()
+    .select({ id: webhookDeliveries.id })
+    .from(webhookDeliveries)
+    .where(and(eq(webhookDeliveries.id, deliveryId), inArray(webhookDeliveries.endpointId, own())));
+  if (!mine) throw new WebhookError("not_found", "Entrega não encontrada.");
+  throw new WebhookError("invalid_request", "O endpoint desta entrega está desativado. Reative-o antes de reenviar.");
 }

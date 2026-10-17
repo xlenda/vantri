@@ -178,6 +178,63 @@ export async function confirmTotpSetup(userId: string, code: string, token: stri
   return true;
 }
 
+// Troca de app autenticador de quem já tem 2FA, sem instante sem 2FA: o segredo novo não vai ao banco até ser
+// confirmado. Fica cifrado (AES-GCM, à prova de adulteração) com o dono, a sessão e a validade, num cookie httpOnly
+// que só a sessão que passou por senha + código atual tem. O segredo antigo vale até a confirmação.
+const ROTATION_TTL_MS = 10 * 60_000;
+
+/** Segredo novo pendente da troca de app (o valor do cookie). Não grava nada. */
+export function beginTotpRotation(userId: string, sessionId: string): string {
+  return encrypt(JSON.stringify({ u: userId, sid: sessionId, s: newTotpSecret(), exp: Date.now() + ROTATION_TTL_MS }));
+}
+
+/** O segredo pendente, se o cookie for deste usuário e desta sessão e estiver no prazo; senão null. */
+export function pendingTotpSecret(userId: string, sessionId: string, pending: string | undefined): string | null {
+  if (!pending) return null;
+  try {
+    const r = JSON.parse(decrypt(pending)) as { u?: unknown; sid?: unknown; s?: unknown; exp?: unknown };
+    const ok = r.u === userId && r.sid === sessionId && typeof r.exp === "number" && r.exp > Date.now();
+    return ok && typeof r.s === "string" ? r.s : null;
+  } catch {
+    return null; // adulterado, de outra chave ou malformado
+  }
+}
+
+/**
+ * Confirma a troca: o 1º código do app novo vale → o segredo novo substitui o antigo (o 2FA nunca desliga) e as
+ * outras sessões do usuário caem, na mesma transação (quem estava nelas passou pelo 2FA antigo). Limite por usuário
+ * igual ao do consumeTotp; o passo usado fica como último (o código não serve de novo).
+ */
+export async function confirmTotpRotation(
+  userId: string,
+  sessionId: string,
+  pending: string | undefined,
+  code: string,
+): Promise<boolean> {
+  const secret = pendingTotpSecret(userId, sessionId, pending);
+  if (!secret) return false;
+  const limitKey = `totp:${userId}`;
+  if (!(await rateLimit(limitKey, 10, 15 * 60)).ok) return false;
+  const step = await checkTotpStep(secret, code);
+  if (step === null) return false;
+  const swapped = await db().transaction(async (tx) => {
+    const updated = await tx
+      .update(users)
+      .set({
+        totpSecretEnc: encrypt(secret),
+        totpLastStep: sql`greatest(coalesce(${users.totpLastStep}, ${step}), ${step})`,
+      })
+      .where(and(eq(users.id, userId), eq(users.totpEnabled, true)))
+      .returning({ id: users.id });
+    if (updated.length !== 1) return false;
+    await tx.delete(sessions).where(and(eq(sessions.userId, userId), ne(sessions.id, sessionId)));
+    return true;
+  });
+  if (!swapped) return false;
+  await releaseRateLimit(limitKey);
+  return true;
+}
+
 /**
  * Troca a senha e derruba as outras sessões do usuário. `keepToken` tem de ser uma sessão
  * do próprio usuário que já passou pelo 2FA; senão nada muda.

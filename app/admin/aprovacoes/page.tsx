@@ -1,3 +1,4 @@
+import { inArray } from "drizzle-orm";
 import type { Metadata } from "next";
 import Link from "next/link";
 import type { ReactNode } from "react";
@@ -8,8 +9,11 @@ import { Badge } from "@/app/components/ui/status-badge";
 import { feeText } from "@/app/painel/lib";
 import { requireAdmin } from "@/lib/auth/guards";
 import { brl, dateTime } from "@/lib/br/money";
+import { db } from "@/lib/db/client";
+import { users } from "@/lib/db/schema";
 import { type ApprovalKind, listPendingApprovals } from "@/lib/services/admin/approvals";
 import type { Fees } from "@/lib/services/merchants";
+import { maskEmail } from "../admin-lib";
 import { OpButton } from "../clientes/op-button";
 import { CodeInput } from "../equipe/forms";
 import { decideApprovalAction } from "./actions";
@@ -21,12 +25,13 @@ const KIND_LABEL: Record<ApprovalKind, string> = {
   payout_reversal: "Estorno manual de saque",
   fee_change: "Mudança de taxa",
   merchant_reactivate: "Reativação de cliente",
+  account_recovery: "Recuperação de acesso",
 };
 
 type Pending = Awaited<ReturnType<typeof listPendingApprovals>>[number];
 
 /** O que a aprovação aplica, em uma frase. O payload foi validado por tipo ao criar o pedido (requestApproval). */
-function effect(r: Pending): ReactNode {
+function effect(r: Pending, emails: Map<string, string>): ReactNode {
   switch (r.kind) {
     case "balance_adjustment": {
       const cents = r.amountCents ?? 0;
@@ -49,20 +54,33 @@ function effect(r: Pending): ReactNode {
     }
     case "merchant_reactivate":
       return "Reativar o cliente: volta a usar o painel e a API.";
+    case "account_recovery": {
+      const email = emails.get((r.payload as { userId: string }).userId);
+      return `Senha temporária nova e 2FA zerado para ${email ? maskEmail(email) : "o usuário"}; as sessões dele caem. A senha aparece só para quem aprovar: confirme a identidade fora do sistema e passe a senha por um canal seguro.`;
+    }
   }
 }
 
 export default async function AprovacoesPage() {
   const { user } = await requireAdmin({ perm: "quatro_olhos:aprovar" });
   const rows = await listPendingApprovals();
+  // E-mail (mascarado na tela) de quem teria o acesso recuperado.
+  const recoveryIds = rows.flatMap((r) => (r.kind === "account_recovery" ? [(r.payload as { userId: string }).userId] : []));
+  const emails = new Map(
+    recoveryIds.length
+      ? (await db().select({ id: users.id, email: users.email }).from(users).where(inArray(users.id, recoveryIds))).map(
+          (u) => [u.id, u.email] as const,
+        )
+      : [],
+  );
 
   return (
     <>
       <h1 className="text-2xl sm:text-3xl">Aprovações</h1>
       <p className="mt-2 max-w-2xl text-sm leading-relaxed text-muted">
-        Quatro olhos: ajuste de saldo, estorno manual de saque, mudança de taxa de cliente ativo e reativação de cliente
-        só acontecem quando um segundo administrador aprova. Quem pediu não aprova o próprio pedido. Aprovar aplica na
-        hora; recusar não aplica nada.
+        Quatro olhos: ajuste de saldo, estorno manual de saque, mudança de taxa de cliente ativo, reativação de cliente e
+        recuperação de acesso (senha e 2FA juntos) só acontecem quando um segundo administrador aprova. Quem pediu não
+        aprova o próprio pedido. Aprovar aplica na hora; recusar não aplica nada.
       </p>
 
       {rows.length === 0 ? (
@@ -84,7 +102,7 @@ export default async function AprovacoesPage() {
                       {r.tradeName}
                     </Link>
                   </Row>
-                  <Row label="O que muda">{effect(r)}</Row>
+                  <Row label="O que muda">{effect(r, emails)}</Row>
                   <Row label="Motivo">{r.reason}</Row>
                   <Row label="Pedido por">{`${r.requesterEmail} em ${dateTime(r.createdAt)}`}</Row>
                 </dl>
@@ -111,7 +129,9 @@ function Row({ label, children }: { label: string; children: ReactNode }) {
 function Decide({ id, own }: { id: string; own: boolean }) {
   return (
     <ActionForm action={decideApprovalAction} className="mt-5 space-y-4 border-t border-line pt-5">
-      <input type="hidden" name="id" value={id} />
+      {/* Nunca name="id" aqui: um campo "id" sobrescreve form.id no DOM, e o React usa form.id para ligar o campo
+          temporário do botão clicado (op) ao formulário — o "op" sumia e todo Aprovar/Recusar dava "Pedido inválido". */}
+      <input type="hidden" name="approvalId" value={id} />
       <Input
         label="Motivo da recusa"
         name="reason"

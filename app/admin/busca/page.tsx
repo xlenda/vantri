@@ -125,7 +125,8 @@ export default async function BuscaPage({
                       <StatusBadge kind="payout" status={p.status} />
                     </td>
                     <td>
-                      <Go href={can("saques:operar") ? `/admin/saques/${p.id}` : null}>Abrir saque</Go>
+                      {/* Mesma permissão que /admin/saques/[id] exige (o suporte lê o saque; as ações pedem mais). */}
+                      <Go href={can("transacoes:ler") ? `/admin/saques/${p.id}` : null}>Abrir saque</Go>
                     </td>
                   </tr>
                 )}

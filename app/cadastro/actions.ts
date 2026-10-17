@@ -26,6 +26,7 @@ const SIGNUP_ERRORS: Record<MerchantErrorCode, string> = {
   not_found: GENERIC_ERROR,
   invalid_status: GENERIC_ERROR,
   provider_error: GENERIC_ERROR,
+  needs_approval: GENERIC_ERROR, // só da mudança de taxa no admin; o cadastro nunca chega lá
 };
 
 export async function signupAction(prev: SignupState, fd: FormData): Promise<SignupState> {

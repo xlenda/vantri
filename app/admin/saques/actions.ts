@@ -12,7 +12,7 @@ import { db } from "@/lib/db/client";
 import { merchants, payouts } from "@/lib/db/schema";
 import { logError } from "@/lib/log";
 import { ApprovalError, reasonSchema, requestApproval } from "@/lib/services/admin/approvals";
-import { PayoutError, type PayoutRow, repollPayout } from "@/lib/services/payouts";
+import { hasPendingReversal, PayoutError, type PayoutRow, repollPayout } from "@/lib/services/payouts";
 import { formFields } from "../format";
 
 // Operação de saque: permissão no servidor (o botão escondido não protege nada) e código 2FA novo em toda ação.
@@ -55,6 +55,9 @@ export async function repollPayoutAction(_prev: FormState, fd: FormData): Promis
   if (p.status !== "processing") return { error: "Este saque não está mais em processamento: não há o que consultar." };
   if (!p.providerPayoutId && !p.providerAccountId) {
     return { error: "O cliente não tem conta no parceiro: não há como reenviar este saque." };
+  }
+  if (!p.providerPayoutId && (await hasPendingReversal(payoutId))) {
+    return { error: "Há um pedido de estorno deste saque em Aprovações: decida o pedido antes de reenviar." };
   }
   const totpProblem = await freshTotpProblem(user.id, fd);
   if (totpProblem) return { error: totpProblem };

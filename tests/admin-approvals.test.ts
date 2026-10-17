@@ -142,7 +142,7 @@ const askAdjust = async (merchantId: string, direction: "credito" | "debito", am
     form({ merchantId, direction, amount, reason: "Acerto de tarifa de outubro", code: await freshCode() }),
   );
 const decide = async (id: string, op: "approve" | "reject", reason = "") =>
-  decideApprovalAction(undefined, form({ id, op, reason, code: await freshCode() }));
+  decideApprovalAction(undefined, form({ approvalId: id, op, reason, code: await freshCode() }));
 
 describe("quatro olhos no ajuste de saldo", () => {
   it("operador pede com código novo, nada muda até outro admin aprovar; aprovado, credita uma vez e audita os dois", async () => {
@@ -297,8 +297,8 @@ describe("quatro olhos no ajuste de saldo", () => {
 
     boss.as();
     const [{ id }] = await listPendingApprovals();
-    expect(await decideApprovalAction(undefined, form({ id, op: "approve" }))).toEqual(NO_CODE);
-    expect(await decideApprovalAction(undefined, form({ id, op: "approve", code: wrong }))).toEqual(WRONG_CODE);
+    expect(await decideApprovalAction(undefined, form({ approvalId: id, op: "approve" }))).toEqual(NO_CODE);
+    expect(await decideApprovalAction(undefined, form({ approvalId: id, op: "approve", code: wrong }))).toEqual(WRONG_CODE);
     expect(await available(m)).toBe(300);
     expect((await pending())[0].status).toBe("pending");
   });
@@ -378,6 +378,10 @@ describe("telas", () => {
 
     boss.as();
     const html = renderToStaticMarkup(await AprovacoesPage());
+    // Um campo name="id" sobrescreve form.id no DOM e o React perde o "op" do botão clicado (Aprovar/Recusar viravam
+    // "Pedido inválido." no navegador, achado no E2E da T16).
+    expect(html).toContain('name="op"');
+    expect(html).not.toContain('name="id"');
     const { tradeName } = await merchantRow(m);
     expect(html).toContain(tradeName);
     expect(html).toContain(`href="/admin/clientes/${m}"`);

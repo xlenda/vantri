@@ -161,8 +161,20 @@ export default async function TarifasPage({ searchParams }: { searchParams: Prom
               </Select>
               <p className="rounded-xl bg-accent/40 px-3 py-2 text-xs font-semibold text-ink">
                 Os termos prometem aviso com 30 dias de antecedência antes de mudar a tarifa de um cliente ativo: avise o
-                cliente antes de aplicar.
+                cliente antes. Cliente que está ou já esteve ativo vira pedido de quatro olhos (motivo e código abaixo) e
+                só muda quando outro administrador aprovar em Aprovações.
               </p>
+              <Input label="Motivo (cliente ativo)" name="reason" id="plano-motivo" maxLength={500} />
+              <Input
+                label="Seu código do app autenticador (cliente ativo)"
+                name="code"
+                id="plano-codigo"
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                pattern="[0-9]{6}"
+                maxLength={6}
+                className="font-semibold tracking-[0.3em]"
+              />
               <p className="text-xs text-muted">
                 As 4 taxas do plano substituem as do cliente e valem para as próximas transações.
               </p>

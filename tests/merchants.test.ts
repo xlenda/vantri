@@ -428,7 +428,9 @@ describe("admin", () => {
     await approveMerchant(b, adminId);
     await suspendMerchant(b, adminId);
     await reactivateMerchant(b, adminId);
-    await updateFees(b, fees, adminId);
+    // Cliente que já esteve ativo: direto o serviço recusa (nada grava); só a aprovação de quatro olhos aplica.
+    expect(await errorCode(updateFees(b, fees, adminId))).toBe("needs_approval");
+    await updateFees(b, fees, adminId, { approved: true });
 
     const by = (action: string, meta: Record<string, unknown>) => ({ actorUserId: adminId, action, meta });
     const rows = await d

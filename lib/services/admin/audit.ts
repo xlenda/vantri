@@ -46,9 +46,14 @@ const ACTION_LABEL: Record<string, string> = {
   "approval.approve": "Pedido de quatro olhos aprovado",
   "approval.reject": "Pedido de quatro olhos recusado",
   "fee_plan.create": "Plano de tarifa criado",
+  "fee_plan.archive": "Plano de tarifa arquivado",
   "export.transactions": "Transações exportadas",
   "export.payouts": "Saques exportados",
   "export.search": "Busca exportada",
+  "export.fee_history": "Histórico de tarifas exportado",
+  "med.note": "Anotação interna no MED",
+  "webhook.resend_batch": "Webhooks reenviados em lote",
+  "user.recover_access": "Acesso recuperado (senha e 2FA)",
 };
 export const actionLabel = (action: string) => (Object.hasOwn(ACTION_LABEL, action) ? ACTION_LABEL[action] : action);
 

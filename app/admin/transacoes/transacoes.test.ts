@@ -169,6 +169,12 @@ describe("exportação de transações", () => {
     for (const secret of ["52998224725", "529.982.247-25", "HASH_INTERNO", "IDEMP_INTERNA", "sim_po_INTERNO"]) {
       expect(text).not.toContain(secret);
     }
+
+    // Chave de e-mail (e celular/aleatória) também sai mascarada, como no export de /admin/saques.
+    const emailCsv = await body(await GET(exportUrl("tipo=saques&status=processing")));
+    expect(emailCsv).toContain(processing.id);
+    expect(emailCsv).toContain("p•••@exemplo.com");
+    expect(emailCsv).not.toContain("pix@exemplo.com");
   });
 
   it("acima do teto recusa (422), sem arquivo cortado e sem auditoria", async () => {

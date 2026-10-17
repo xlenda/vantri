@@ -6,8 +6,9 @@ import { GENERIC_ERROR } from "@/app/conta/acesso";
 import { requireAdmin } from "@/lib/auth/guards";
 import { parseReais } from "@/lib/br/money";
 import { logError } from "@/lib/log";
-import { archiveFeePlan, assignPlanToMerchant, createFeePlan, FeePlanError } from "@/lib/services/admin/fee-plans";
-import { MerchantError } from "@/lib/services/merchants";
+import { activePlanFees, archiveFeePlan, assignPlanToMerchant, createFeePlan, FeePlanError } from "@/lib/services/admin/fee-plans";
+import { type Fees, MerchantError } from "@/lib/services/merchants";
+import { askApproval } from "../approval-request";
 import { formFields, parsePercent } from "../format";
 
 // Toda ação re-checa a permissão no servidor: o menu esconder "Tarifas" do suporte é só cosmético.
@@ -56,13 +57,32 @@ export async function archiveFeePlanAction(_prev: FormState, fd: FormData): Prom
   return { ok: "Plano arquivado. Quem já usa continua com as mesmas taxas." };
 }
 
+/**
+ * Cliente que nunca esteve ativo: o plano vale na hora. Cliente que está ou já esteve ativo: o serviço recusa a troca
+ * direta (needs_approval) e ela vira pedido de quatro olhos com o plano junto (motivo + código 2FA novo).
+ */
 export async function assignFeePlanAction(_prev: FormState, fd: FormData): Promise<FormState> {
   const { user } = await requireAdmin(PERM);
-  const { merchantId, planId } = formFields(fd, ["merchantId", "planId"]); // o serviço valida o formato
+  const { merchantId, planId, reason } = formFields(fd, ["merchantId", "planId", "reason"]); // o serviço valida o formato
+  const ids = { merchant: merchantId, plan: planId };
   try {
     await assignPlanToMerchant(merchantId, planId, user.id);
   } catch (e) {
-    return fail(e, "admin: falha ao aplicar plano de tarifa", { merchant: merchantId, plan: planId });
+    if (!(e instanceof MerchantError && e.code === "needs_approval")) return fail(e, "admin: falha ao aplicar plano de tarifa", ids);
+    let fees: Fees;
+    try {
+      fees = await activePlanFees(planId);
+    } catch (e2) {
+      return fail(e2, "admin: falha ao aplicar plano de tarifa", ids);
+    }
+    return askApproval(
+      user.id,
+      fd,
+      "fee_change",
+      { merchantId, ...fees, planId, reason },
+      "Cliente ativo: pedido de troca de plano enviado. As taxas só mudam quando outro administrador aprovar em Aprovações.",
+      ids,
+    );
   }
   revalidatePath("/admin/tarifas");
   revalidatePath(`/admin/clientes/${merchantId}`);

@@ -1,4 +1,4 @@
-import { asc, eq } from "drizzle-orm";
+import { and, asc, eq, isNull, ne } from "drizzle-orm";
 import { z } from "zod";
 import { hashPassword } from "@/lib/auth/password";
 import { type CnpjLookup, lookupCnpj } from "@/lib/br/cnpj-lookup";
@@ -23,7 +23,8 @@ export type MerchantErrorCode =
   | "email_taken"
   | "not_found"
   | "invalid_status"
-  | "provider_error";
+  | "provider_error"
+  | "needs_approval";
 
 export class MerchantError extends Error {
   constructor(
@@ -257,21 +258,37 @@ export const rejectMerchant = transition("pending", "rejected", "merchant.reject
 export const suspendMerchant = transition("active", "suspended", "merchant.suspend");
 export const reactivateMerchant = transition("suspended", "active", "merchant.reactivate");
 
+/** Os termos prometem aviso de 30 dias antes de mudar a tarifa de cliente ativo: cliente que está ou já esteve ativo. */
+export const feeChangeNeedsApproval = (m: { status: string; approvedAt: Date | null }) =>
+  m.status === "active" || m.approvedAt !== null;
+
 /**
  * bps 0–10000, centavos 0–100000, inteiros. Cada mudança vira uma linha de vigência em fee_history (na mesma
  * transação); `planId` quando as taxas vieram de um plano (assignPlanToMerchant), senão é taxa personalizada.
+ * Cliente que está ou já esteve ativo (feeChangeNeedsApproval) só muda pela aprovação de quatro olhos (`approved`);
+ * sem ela, needs_approval. A regra fica aqui, na mesma instrução que grava, para valer em qualquer caminho (taxa avulsa,
+ * plano) e sem corrida com a aprovação do cliente.
  */
 export async function updateFees(
   id: string,
   fees: Fees,
   actorId: string,
-  opts: { planId?: string; tx?: Tx } = {},
+  opts: { planId?: string; tx?: Tx; approved?: boolean } = {},
 ): Promise<void> {
   const f = parse(feesSchema, fees);
   if (!z.uuid().safeParse(id).success) throw notFound();
   await inTx(opts.tx, async (tx) => {
-    const [m] = await tx.update(merchants).set(f).where(eq(merchants.id, id)).returning({ id: merchants.id });
-    if (!m) throw notFound();
+    const neverActive = and(ne(merchants.status, "active"), isNull(merchants.approvedAt));
+    const [m] = await tx
+      .update(merchants)
+      .set(f)
+      .where(and(eq(merchants.id, id), opts.approved ? undefined : neverActive))
+      .returning({ id: merchants.id });
+    if (!m) {
+      const [exists] = await tx.select({ id: merchants.id }).from(merchants).where(eq(merchants.id, id));
+      if (!exists) throw notFound();
+      throw new MerchantError("needs_approval", "Cliente ativo: a mudança de taxa precisa de quatro olhos.");
+    }
     await writeAudit(tx, actorId, "merchant.update_fees", { merchantId: id, ...f, ...(opts.planId && { planId: opts.planId }) });
     await tx
       .insert(feeHistory)

@@ -27,12 +27,12 @@ export function CodeInput({ id }: { id: string }) {
 }
 
 /** "Fechar" remonta o formulário: o estado da ação (com a senha temporária) some da tela e da memória. */
-export function UserOpsForm({ userId, email }: { userId: string; email: string }) {
+export function UserOpsForm({ userId, email, merchant }: { userId: string; email: string; merchant: boolean }) {
   const [round, setRound] = useState(0);
-  return <OpsOnce key={round} userId={userId} email={email} onClose={() => setRound((r) => r + 1)} />;
+  return <OpsOnce key={round} userId={userId} email={email} merchant={merchant} onClose={() => setRound((r) => r + 1)} />;
 }
 
-function OpsOnce({ userId, email, onClose }: { userId: string; email: string; onClose: () => void }) {
+function OpsOnce({ userId, email, merchant, onClose }: { userId: string; email: string; merchant: boolean; onClose: () => void }) {
   const [state, action] = useActionState(userOpAction, undefined);
 
   if (state && "tempPassword" in state && state.tempPassword) {
@@ -92,6 +92,24 @@ function OpsOnce({ userId, email, onClose }: { userId: string; email: string; on
           Desbloquear
         </OpButton>
       </div>
+      {merchant && (
+        <div className="space-y-3 border-t border-line pt-4">
+          <p className="text-xs text-muted">
+            Perdeu a senha e o app ao mesmo tempo? Senha nova e 2FA zerado juntos entregariam a conta a quem opera: vira
+            pedido de quatro olhos, e a senha temporária aparece só para quem aprovar.
+          </p>
+          <Input
+            label="Motivo (para pedir recuperação)"
+            name="reason"
+            id={`motivo-${userId}`}
+            maxLength={500}
+            hint="Fica na auditoria: não escreva dados pessoais."
+          />
+          <OpButton op="recuperar" variant="ghost">
+            Pedir recuperação de acesso
+          </OpButton>
+        </div>
+      )}
     </form>
   );
 }
