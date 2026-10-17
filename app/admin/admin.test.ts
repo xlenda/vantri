@@ -12,8 +12,10 @@ import { signupMerchant } from "@/lib/services/merchants";
 import { seedAdmin } from "@/scripts/seed-admin";
 import { createTestDb } from "@/tests/helpers/db";
 import { newMerchant } from "@/tests/helpers/factories";
+import { csvResponse } from "./admin-lib";
 import ClientePage from "./clientes/[id]/page";
 import { createMerchantAction, merchantStatusAction, updateFeesAction } from "./clientes/actions";
+import AdminLayout from "./layout";
 import { parsePercent, percent, reais, todayDate, todayStart } from "./format";
 import { GET as downloadFile } from "./med/arquivo/[id]/route";
 import { closeMedAction, openTestMedAction } from "./med/actions";
@@ -21,7 +23,9 @@ import AdminHome from "./page";
 import { adminOverview, listChargesAdmin, listPayoutsAdmin, parseTxFilters } from "./queries";
 
 // Guarda de verdade testado em tests/auth.test.ts; aqui só "logado como admin" ou "não logado" (redirect lança).
-const auth = vi.hoisted(() => ({ user: null as null | { id: string; role: "admin" } }));
+const auth = vi.hoisted(
+  () => ({ user: null as null | { id: string; role: "admin"; adminRole?: "admin" | "operador" | "suporte" | null; email?: string } }),
+);
 vi.mock("@/lib/auth/guards", () => ({
   requireUser: vi.fn(async (opts: { role: string }) => {
     if (!auth.user || opts.role !== "admin") throw new Error("NEXT_REDIRECT");
@@ -607,5 +611,50 @@ describe("download de anexo", () => {
     const id = await file("a.pdf");
     auth.user = null;
     await expect(get(id)).rejects.toThrow("NEXT_REDIRECT");
+  });
+});
+
+describe("casca do admin", () => {
+  // AdminLayout é async; resolvemos antes de passar para renderToStaticMarkup.
+  const renderAs = async (adminRole: "admin" | "operador" | "suporte") => {
+    auth.user = { id: "u1", role: "admin", adminRole, email: "ana@vantri.test" };
+    return renderToStaticMarkup(await AdminLayout({ children: null }));
+  };
+
+  it("admin vê todos os itens e o selo do papel", async () => {
+    const html = await renderAs("admin");
+    for (const label of ["Visão do suporte", "Clientes e sellers", "Transações PIX", "Saques", "Webhooks", "MED", "Equipe e papéis", "Aprovações", "Tarifas", "Saúde"]) {
+      expect(html).toContain(label);
+    }
+    expect(html).toContain("Administrador"); // selo do papel
+    expect(html).toContain("ana@vantri.test");
+  });
+
+  it("suporte não vê Tarifas, Aprovações nem Equipe, mas tem o selo e os itens de leitura", async () => {
+    const html = await renderAs("suporte");
+    for (const hidden of ["Tarifas", "Aprovações", "Equipe e papéis"]) expect(html).not.toContain(hidden);
+    for (const seen of ["Visão do suporte", "Clientes e sellers", "Transações PIX", "MED", "Auditoria", "Saúde"]) {
+      expect(html).toContain(seen);
+    }
+    expect(html).toContain("Suporte"); // selo do papel
+  });
+
+  it("mostra a busca global e o indicador de ambiente", async () => {
+    const html = await renderAs("admin");
+    expect(html).toContain("Localizar operação");
+    expect(html).toContain("/admin/busca");
+    expect(html).toContain("Ambiente: Demonstração"); // PIX_PROVIDER=simulator no beforeEach
+  });
+});
+
+describe("csvResponse", () => {
+  it("monta CSV com BOM, ponto-e-vírgula, CRLF, anexo e no-store; neutraliza injeção", async () => {
+    const res = csvResponse("x.csv", ["Nome", "Valor"], [["=1+1", 'a;"b"']]);
+    expect(res.headers.get("content-type")).toBe("text/csv; charset=utf-8");
+    expect(res.headers.get("content-disposition")).toBe('attachment; filename="x.csv"');
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    // .text() descarta o BOM (spec do fetch); conferimos nos bytes com ignoreBOM.
+    const text = new TextDecoder("utf-8", { ignoreBOM: true }).decode(await res.arrayBuffer());
+    expect(text).toBe('﻿Nome;Valor\r\n\'=1+1;"a;""b"""\r\n');
   });
 });
