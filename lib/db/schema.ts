@@ -43,6 +43,10 @@ export const merchants = pgTable("merchants", {
   feeOutBps: integer("fee_out_bps").notNull().default(0),
   feeOutFixedCents: integer("fee_out_fixed_cents").notNull().default(100),
   approvedAt: tstz("approved_at"),
+  // Motivo da recusa (status='rejected'); preenchido na revisão manual.
+  rejectionReason: text("rejection_reason"),
+  // Resultado da consulta de CNPJ (razão social, situação, CNAEs). Guardado para a revisão não refazer a busca.
+  cnpjLookup: jsonb("cnpj_lookup"),
   createdAt: createdAt(),
 });
 
@@ -254,8 +258,21 @@ export const medEvents = pgTable(
       .notNull()
       .references(() => medCases.id, { onDelete: "cascade" }),
     type: text("type", {
-      enum: ["opened", "defense_submitted", "closed_merchant_won", "closed_payer_refunded"],
+      // União aditiva: os valores já em uso (med.ts) + os novos do backoffice. Nada é removido.
+      enum: [
+        "opened",
+        "defense_submitted",
+        "closed_merchant_won",
+        "closed_payer_refunded",
+        "funds_blocked",
+        "defense_sent",
+        "analysis",
+        "closed",
+        "note",
+      ],
     }).notNull(),
+    // Quem gerou o evento. Null nas linhas antigas (eventos do sistema/provedor antes desta coluna).
+    source: text("source", { enum: ["provider", "admin", "merchant", "system"] }),
     meta: jsonb("meta").notNull().default({}),
     createdAt: createdAt(),
   },
@@ -327,5 +344,77 @@ export const auditLog = pgTable("audit_log", {
   actorUserId: uuid("actor_user_id").references(() => users.id),
   action: text("action").notNull(),
   meta: jsonb("meta").notNull().default({}),
+  createdAt: createdAt(),
+});
+
+// Quatro olhos: movimento manual de dinheiro e ações sensíveis viram pedido que OUTRO admin aprova.
+// Quem pediu (requested_by) não pode aprovar — checado no servidor. O efeito só acontece na aprovação.
+export const pendingApprovals = pgTable(
+  "pending_approvals",
+  {
+    id: id(),
+    kind: text("kind", {
+      enum: ["balance_adjustment", "payout_reversal", "fee_change", "merchant_reactivate"],
+    }).notNull(),
+    merchantId: uuid("merchant_id")
+      .notNull()
+      .references(() => merchants.id),
+    payload: jsonb("payload").notNull(), // lista branca por tipo (validada no serviço)
+    reason: text("reason").notNull(),
+    amountCents: integer("amount_cents"), // só os tipos que mexem em dinheiro
+    status: text("status", { enum: ["pending", "approved", "rejected"] })
+      .notNull()
+      .default("pending"),
+    requestedBy: uuid("requested_by")
+      .notNull()
+      .references(() => users.id),
+    decidedBy: uuid("decided_by").references(() => users.id),
+    decidedAt: tstz("decided_at"),
+    resultRefId: uuid("result_ref_id"), // ex.: id do lançamento/estorno criado na aprovação
+    createdAt: createdAt(),
+  },
+  (t) => [index("pending_approvals_status_created_at_idx").on(t.status, t.createdAt)],
+);
+
+// Execução de cada passo do cron (diagnóstico no painel). error = só categoria, nunca mensagem crua.
+export const cronRuns = pgTable(
+  "cron_runs",
+  {
+    id: id(),
+    step: text("step").notNull(),
+    startedAt: tstz("started_at").notNull(),
+    finishedAt: tstz("finished_at"),
+    result: jsonb("result"),
+    error: text("error"),
+    createdAt: createdAt(),
+  },
+  (t) => [index("cron_runs_step_started_at_idx").on(t.step, t.startedAt)],
+);
+
+// Planos de taxa reutilizáveis. archived_at marca o plano aposentado (não apaga, mantém histórico).
+export const feePlans = pgTable("fee_plans", {
+  id: id(),
+  name: text("name").notNull(),
+  feeInBps: integer("fee_in_bps").notNull(),
+  feeInFixedCents: integer("fee_in_fixed_cents").notNull(),
+  feeOutBps: integer("fee_out_bps").notNull(),
+  feeOutFixedCents: integer("fee_out_fixed_cents").notNull(),
+  archivedAt: tstz("archived_at"),
+  createdAt: createdAt(),
+});
+
+// Histórico de taxa por lojista: cada mudança grava a vigência (effective_from) e quem mudou.
+export const feeHistory = pgTable("fee_history", {
+  id: id(),
+  merchantId: uuid("merchant_id")
+    .notNull()
+    .references(() => merchants.id),
+  feeInBps: integer("fee_in_bps").notNull(),
+  feeInFixedCents: integer("fee_in_fixed_cents").notNull(),
+  feeOutBps: integer("fee_out_bps").notNull(),
+  feeOutFixedCents: integer("fee_out_fixed_cents").notNull(),
+  planId: uuid("plan_id").references(() => feePlans.id),
+  effectiveFrom: tstz("effective_from").notNull(),
+  actorUserId: uuid("actor_user_id").references(() => users.id),
   createdAt: createdAt(),
 });
