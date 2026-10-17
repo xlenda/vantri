@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import { EMPRESA, Legal } from "../components/Legal";
-import { PSP_NAME, RC16 } from "../site";
+import { DPO_EMAIL, DPO_NAME, PSP_NAME, RC16 } from "../site";
 
 export const metadata: Metadata = {
   title: "Política de privacidade | Vantri",
@@ -107,7 +107,17 @@ export default function Privacidade() {
       </p>
 
       <h2>9. Encarregado (DPO)</h2>
-      <p>Canal do encarregado pelo tratamento de dados: [nome e e-mail a definir antes de operar].</p>
+      {DPO_NAME && DPO_EMAIL ? (
+        <p>
+          O encarregado pelo tratamento de dados é {DPO_NAME}. Fale com ele pelo e-mail{" "}
+          <a href={`mailto:${DPO_EMAIL}`}>{DPO_EMAIL}</a>.
+        </p>
+      ) : (
+        <p>
+          <strong>Pendente:</strong> o nome e o e-mail do encarregado ainda não foram definidos e serão publicados aqui antes do início da
+          operação.
+        </p>
+      )}
 
       <h2>10. Alterações</h2>
       <p>Podemos atualizar esta política. A data da última atualização fica no topo da página, e mudanças relevantes serão avisadas no painel.</p>

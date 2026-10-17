@@ -12,6 +12,7 @@ import { signupMerchant } from "@/lib/services/merchants";
 import { seedAdmin } from "@/scripts/seed-admin";
 import { createTestDb } from "@/tests/helpers/db";
 import { newMerchant } from "@/tests/helpers/factories";
+import ClientePage from "./clientes/[id]/page";
 import { createMerchantAction, merchantStatusAction, updateFeesAction } from "./clientes/actions";
 import { parsePercent, percent, reais, todayDate, todayStart } from "./format";
 import { GET as downloadFile } from "./med/arquivo/[id]/route";
@@ -409,6 +410,23 @@ describe("ações de clientes", () => {
       status: "active",
       needsManualReview: false,
     });
+  });
+
+  it("página do cliente: CNPJ completo só pendente em revisão manual; lembrete dos 30 dias na taxa de cliente ativo", async () => {
+    const merchantId = await reviewCnpj();
+    const page = async () => renderToStaticMarkup(await ClientePage({ params: Promise.resolve({ id: merchantId }) }));
+    const reminder = "Os termos prometem aviso com 30 dias de antecedência antes de mudar a tarifa de um cliente ativo";
+
+    const pending = await page();
+    expect(pending).toContain("11.222.333/0001-81");
+    expect(pending).not.toContain(reminder); // ainda não é cliente ativo
+
+    receita.lookup.mockResolvedValue({ ok: true, legalName: "ESCOLA LTDA", cnaes: ["8599604"], active: true });
+    await merchantStatusAction(undefined, form({ merchantId, op: "approve" }));
+    const active = await page();
+    expect(active).toContain("11.222.333/****-**");
+    expect(active).not.toContain("11.222.333/0001-81");
+    expect(active).toContain(reminder);
   });
 
   it("aprova sem confirmação quando não precisa de revisão; transições inválidas dão erro em PT", async () => {

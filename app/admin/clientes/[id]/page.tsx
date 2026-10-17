@@ -123,6 +123,12 @@ export default async function ClientePage({ params }: { params: Promise<{ id: st
             <p className="text-xs text-muted sm:col-span-2">
               Percentual de 0 a 100 com até 2 casas; fixo de R$ 0,00 a R$ 1.000,00. Vale para as próximas transações.
             </p>
+            {m.approvedAt && (
+              <p className="rounded-xl bg-accent/40 px-3 py-2 text-xs font-semibold text-ink sm:col-span-2">
+                Os termos prometem aviso com 30 dias de antecedência antes de mudar a tarifa de um cliente ativo: avise o
+                cliente antes de salvar.
+              </p>
+            )}
             <div className="sm:col-span-2">
               <SubmitButton pendingText="Salvando…">Salvar taxas</SubmitButton>
             </div>

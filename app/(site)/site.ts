@@ -5,6 +5,9 @@ export const SITE_URL = (env(process.env.NEXT_PUBLIC_SITE_URL) || "http://localh
 export const PSP_NAME = env(process.env.NEXT_PUBLIC_PSP_NAME) || "instituição parceira";
 export const LEGAL_NAME = env(process.env.NEXT_PUBLIC_COMPANY_LEGAL_NAME);
 export const CNPJ = env(process.env.NEXT_PUBLIC_COMPANY_CNPJ);
+// Encarregado (DPO) da LGPD, art. 41: nome e contato públicos. Vazio = a política mostra "Pendente" (definir antes de operar).
+export const DPO_NAME = env(process.env.NEXT_PUBLIC_DPO_NAME);
+export const DPO_EMAIL = env(process.env.NEXT_PUBLIC_DPO_EMAIL);
 
 export const RC16 = `A Vantri não é instituição financeira nem instituição de pagamento autorizada a funcionar pelo Banco Central do Brasil. As contas e as transações Pix são operadas por ${PSP_NAME}, instituição autorizada pelo Banco Central do Brasil.`;
 

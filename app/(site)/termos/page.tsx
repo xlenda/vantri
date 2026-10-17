@@ -102,7 +102,7 @@ export default function Termos() {
         </li>
         <li>
           Você pode enviar uma defesa pelo painel até o prazo mostrado no caso, com texto de 20 a 5.000 caracteres e até 5 anexos (PDF, PNG ou
-          JPEG, de até 5 MB cada).
+          JPEG, de até 4 MB somados por defesa).
         </li>
         <li>Se o caso for encerrado a seu favor, o valor volta para o saldo disponível.</li>
         <li>Se o caso for encerrado a favor de quem pagou, o valor bloqueado é devolvido ao pagador.</li>
