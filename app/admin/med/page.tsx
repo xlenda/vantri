@@ -1,24 +1,29 @@
 import { eq, inArray } from "drizzle-orm";
 import type { Metadata } from "next";
 import Link from "next/link";
+import type { ReactNode } from "react";
 import { ActionForm } from "@/app/components/ui/action-form";
 import { buttonClass } from "@/app/components/ui/button";
 import { Card } from "@/app/components/ui/card";
 import { Input, Select } from "@/app/components/ui/field";
 import { StatusBadge } from "@/app/components/ui/status-badge";
 import { SubmitButton } from "@/app/components/ui/submit-button";
-import { requireUser } from "@/lib/auth/guards";
+import { requireAdmin } from "@/lib/auth/guards";
 import { brl, dateTime } from "@/lib/br/money";
 import { db } from "@/lib/db/client";
 import { charges, merchants } from "@/lib/db/schema";
+import { deadlineBucket, listMedByDeadline, medKpis, merchantMedRates } from "@/lib/services/admin/med-queue";
 import { listMedCases, listMedFiles, type MedCaseRow } from "@/lib/services/med";
-import { reais } from "../format";
+import { DAY_MS, reais } from "../format";
+import { pode } from "../perms-ui";
 import { parseMedFilters } from "../queries";
 import { closeMedAction, openTestMedAction } from "./actions";
+import { Deadline, ratePct } from "./ui";
 
 export const metadata: Metadata = { title: "MED — Admin Vantri" };
 
 const PAGE = 20;
+const HOUR_MS = 3_600_000;
 const TABS = [
   [undefined, "Todos"],
   ["open", "Abertos"],
@@ -26,29 +31,44 @@ const TABS = [
   ["merchant_won", "A favor do lojista"],
   ["payer_refunded", "Devolvidos"],
 ] as const;
+const TAB_CLASS =
+  "rounded-full border border-line bg-white px-3.5 py-1.5 text-sm font-semibold text-muted hover:text-ink aria-[current=page]:border-ink aria-[current=page]:bg-ink aria-[current=page]:text-white";
+// Faixa à esquerda do cartão com a cor do prazo (mesma régua do Deadline).
+const EDGE = { red: "border-l-4 border-l-red-500", amber: "border-l-4 border-l-amber-400", ok: "" } as const;
 
 export default async function MedPage({
   searchParams,
 }: {
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
-  await requireUser({ role: "admin" });
+  const { user } = await requireAdmin({ perm: "med:ler" });
+  // Só mostra/esconde abrir e encerrar: as ações re-checam med:operar no servidor.
+  const canOperate = pode(user.adminRole, "med:operar");
   const simulator = process.env.PIX_PROVIDER === "simulator";
-  const f = parseMedFilters(await searchParams);
-  const { data: cases, nextCursor } = await listMedCases(null, { status: f.status, cursor: f.cursor, limit: PAGE });
+  const sp = await searchParams;
+  const f = parseMedFilters(sp);
+  // "Por prazo" (?ordem=prazo, o link da fila de pendências do início): só os sem desfecho, o mais urgente primeiro.
+  const byDeadline = sp.ordem === "prazo";
+  const [kpis, { data: cases, nextCursor }] = await Promise.all([
+    medKpis(),
+    byDeadline
+      ? listMedByDeadline({ cursor: f.cursor, limit: PAGE, onlyOpen: true })
+      : listMedCases(null, { status: f.status, cursor: f.cursor, limit: PAGE }),
+  ]);
   const ids = [...new Set(cases.map((c) => c.merchantId))];
-  const names = new Map(
+  const [names, rates] = await Promise.all([
     ids.length
-      ? (
-          await db()
-            .select({ id: merchants.id, tradeName: merchants.tradeName })
-            .from(merchants)
-            .where(inArray(merchants.id, ids))
-        ).map((m) => [m.id, m.tradeName])
-      : [],
-  );
-  const href = (status?: string, cursor?: string) =>
-    `/admin/med?${new URLSearchParams({ ...(status && { status }), ...(cursor && { apos: cursor }) })}`;
+      ? db()
+          .select({ id: merchants.id, tradeName: merchants.tradeName })
+          .from(merchants)
+          .where(inArray(merchants.id, ids))
+          .then((rows) => new Map(rows.map((m) => [m.id, m.tradeName])))
+      : new Map<string, string>(),
+    merchantMedRates(ids),
+  ]);
+  const href = (q: Record<string, string | undefined>) =>
+    `/admin/med?${new URLSearchParams(Object.entries(q).filter((e): e is [string, string] => e[1] !== undefined))}`;
+  const base = byDeadline ? { ordem: "prazo" } : { status: f.status };
 
   return (
     <>
@@ -58,15 +78,27 @@ export default async function MedPage({
         o encerramento.
       </p>
 
-      {simulator && <TestMed chargeId={f.chargeId} />}
+      <dl className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-6">
+        <Kpi label="Em aberto" value={kpis.open} />
+        <Kpi label="Bloqueado" value={brl(kpis.blockedCents)} />
+        <Kpi label="Vencem hoje" value={kpis.dueToday} tone={kpis.dueToday ? "amber" : undefined} />
+        <Kpi label="Prazo vencido" value={kpis.overdue} tone={kpis.overdue ? "red" : undefined} />
+        <Kpi label="Defesas a enviar" value={kpis.defensePendingSend} hint="envio requer parceiro" />
+        <Kpi label="Tempo médio até o desfecho" value={duration(kpis.avgResolutionMs)} hint="últimos 30 dias" />
+      </dl>
 
-      <nav aria-label="Filtrar por status" className="mt-8 flex flex-wrap gap-2">
+      {simulator && canOperate && <TestMed chargeId={f.chargeId} />}
+
+      <nav aria-label="Ordenar e filtrar" className="mt-8 flex flex-wrap gap-2">
+        <Link href={href({ ordem: "prazo" })} aria-current={byDeadline ? "page" : undefined} className={TAB_CLASS}>
+          Por prazo
+        </Link>
         {TABS.map(([status, label]) => (
           <Link
             key={label}
-            href={href(status)}
-            aria-current={f.status === status ? "page" : undefined}
-            className="rounded-full border border-line bg-white px-3.5 py-1.5 text-sm font-semibold text-muted hover:text-ink aria-[current=page]:border-ink aria-[current=page]:bg-ink aria-[current=page]:text-white"
+            href={href({ status })}
+            aria-current={!byDeadline && f.status === status ? "page" : undefined}
+            className={TAB_CLASS}
           >
             {label}
           </Link>
@@ -76,12 +108,18 @@ export default async function MedPage({
       <ul className="mt-4 space-y-4">
         {cases.length === 0 && (
           <li className="rounded-2xl border border-line bg-white px-4 py-6 text-center text-sm text-muted">
-            Nenhum caso de MED com este filtro.
+            {byDeadline ? "Nenhum MED aguardando desfecho." : "Nenhum caso de MED com este filtro."}
           </li>
         )}
         {cases.map((c) => (
           <li key={c.id}>
-            <MedCard c={c} tradeName={names.get(c.merchantId) ?? "—"} simulator={simulator} />
+            <MedCard
+              c={c}
+              tradeName={names.get(c.merchantId) ?? "—"}
+              rate={rates.get(c.merchantId) ?? 0}
+              simulator={simulator}
+              canOperate={canOperate}
+            />
           </li>
         ))}
       </ul>
@@ -89,14 +127,14 @@ export default async function MedPage({
       {(f.cursor || nextCursor) && (
         <nav aria-label="Paginação" className="mt-4 flex justify-between gap-3">
           {f.cursor ? (
-            <Link href={href(f.status)} className={buttonClass("ghost")}>
-              Mais recentes
+            <Link href={href(base)} className={buttonClass("ghost")}>
+              {byDeadline ? "Mais urgentes" : "Mais recentes"}
             </Link>
           ) : (
             <span />
           )}
           {nextCursor && (
-            <Link href={href(f.status, nextCursor)} className={buttonClass("ghost")}>
+            <Link href={href({ ...base, apos: nextCursor })} className={buttonClass("ghost")}>
               Próxima
             </Link>
           )}
@@ -106,16 +144,48 @@ export default async function MedPage({
   );
 }
 
-async function MedCard({ c, tradeName, simulator }: { c: MedCaseRow; tradeName: string; simulator: boolean }) {
+const KPI_TONE = { red: "border-red-200 bg-red-50 text-red-800", amber: "border-amber-200 bg-amber-50 text-amber-900" };
+
+function Kpi({ label, value, hint, tone }: { label: string; value: ReactNode; hint?: string; tone?: keyof typeof KPI_TONE }) {
+  return (
+    <div className={`rounded-2xl border p-4 ${tone ? KPI_TONE[tone] : "border-line bg-white"}`}>
+      <dt className="text-xs font-semibold text-muted">{label}</dt>
+      <dd className="mt-1 text-xl font-bold tabular-nums">{value}</dd>
+      {hint && <dd className="mt-0.5 text-xs text-muted">{hint}</dd>}
+    </div>
+  );
+}
+
+function duration(ms: number | null): string {
+  if (ms === null) return "—";
+  if (ms < HOUR_MS) return "menos de 1 h";
+  if (ms < 48 * HOUR_MS) return `${Math.round(ms / HOUR_MS)} h`;
+  return `${(ms / DAY_MS).toLocaleString("pt-BR", { maximumFractionDigits: 1 })} dias`;
+}
+
+async function MedCard({
+  c,
+  tradeName,
+  rate,
+  simulator,
+  canOperate,
+}: {
+  c: MedCaseRow;
+  tradeName: string;
+  rate: number;
+  simulator: boolean;
+  canOperate: boolean;
+}) {
   const files = c.defenseText ? await listMedFiles(c.id, { role: "admin" }) : [];
   const closable = c.status === "open" || c.status === "defended";
   return (
-    <article className="rounded-3xl border border-line bg-white p-5">
+    <article className={`rounded-3xl border border-line bg-white p-5 ${EDGE[deadlineBucket(c)]}`}>
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <Link href={`/admin/clientes/${c.merchantId}`} className="font-semibold text-brand hover:underline">
             {tradeName}
           </Link>
+          <span className="block text-xs text-muted">Taxa de MED (30 dias): {ratePct(rate)}</span>
           <p className="mt-0.5 text-2xl font-bold tabular-nums">{brl(c.amountCents)}</p>
         </div>
         <StatusBadge kind="med" status={c.status} />
@@ -131,7 +201,9 @@ async function MedCard({ c, tradeName, simulator }: { c: MedCaseRow; tradeName: 
         </div>
         <div>
           <dt className="text-xs font-semibold text-muted">Prazo da defesa</dt>
-          <dd>{dateTime(c.defenseDeadline)}</dd>
+          <dd>
+            <Deadline c={c} />
+          </dd>
         </div>
         <div>
           <dt className="text-xs font-semibold text-muted">{c.closedAt ? "Encerrado em" : "Cobrança"}</dt>
@@ -140,6 +212,9 @@ async function MedCard({ c, tradeName, simulator }: { c: MedCaseRow; tradeName: 
           </dd>
         </div>
       </dl>
+      <Link href={`/admin/med/${c.id}`} className="mt-3 inline-block text-sm font-semibold text-brand hover:underline">
+        Ver caso e linha do tempo
+      </Link>
 
       {c.defenseText && (
         <details className="mt-4 rounded-2xl bg-bg/70 p-4 text-sm">
@@ -164,7 +239,7 @@ async function MedCard({ c, tradeName, simulator }: { c: MedCaseRow; tradeName: 
       {!simulator && closable && <p className="mt-4 text-sm text-muted">Aguardando o desfecho do parceiro.</p>}
       {/* Continua montado depois de encerrar para a resposta da ação aparecer. Sem nada visível dentro (só os
           inputs ocultos que o React põe em formulário de Server Action), não ocupa espaço. */}
-      {simulator && (
+      {simulator && canOperate && (
         <ActionForm action={closeMedAction} className="has-[>div]:mt-4">
           {closable && (
             <div className="grid gap-3 border-t border-line pt-4 sm:grid-cols-[1fr_auto] sm:items-end">

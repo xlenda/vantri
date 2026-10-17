@@ -1,4 +1,4 @@
-import { and, desc, eq, gt, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, ne, sql } from "drizzle-orm";
 import { db, type Tx } from "@/lib/db/client";
 import { charges, medCases, medEvents, medFiles } from "@/lib/db/schema";
 import { logError } from "@/lib/log";
@@ -333,7 +333,10 @@ export async function listMedFiles(
     .orderBy(medFiles.createdAt, medFiles.filename, medFiles.id); // mesma defesa = mesmo created_at
 }
 
-/** Linha do tempo de um caso, mais antigos primeiro. Mesma regra de dono de `getMedFile` (outro lojista → []). */
+/**
+ * Linha do tempo de um caso, mais antigos primeiro. Mesma regra de dono de `getMedFile` (outro lojista → []).
+ * Anotação interna da equipe (`note`) só o admin vê.
+ */
 export async function listMedEvents(
   caseId: string,
   viewer: Viewer,
@@ -344,7 +347,7 @@ export async function listMedEvents(
     .select({ type: medEvents.type, source: medEvents.source, createdAt: medEvents.createdAt, meta: medEvents.meta })
     .from(medEvents)
     .innerJoin(medCases, eq(medEvents.medCaseId, medCases.id))
-    .where(and(eq(medEvents.medCaseId, caseId), owner))
+    .where(and(eq(medEvents.medCaseId, caseId), owner, viewer.role === "admin" ? undefined : ne(medEvents.type, "note")))
     // Eventos da mesma transação têm o mesmo created_at e o id é aleatório: 'opened' antes de 'funds_blocked'.
     .orderBy(medEvents.createdAt, sql`${medEvents.type} <> 'opened'`, medEvents.id);
 }

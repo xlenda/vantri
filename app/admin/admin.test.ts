@@ -31,6 +31,11 @@ vi.mock("@/lib/auth/guards", () => ({
     if (!auth.user || opts.role !== "admin") throw new Error("NEXT_REDIRECT");
     return { user: auth.user };
   }),
+  // A permissão do papel é testada com o guarda de verdade em tests/perms.test.ts e tests/med-queue.test.ts.
+  requireAdmin: vi.fn(async () => {
+    if (!auth.user) throw new Error("NEXT_REDIRECT");
+    return { user: auth.user };
+  }),
 }));
 vi.mock("next/cache", () => ({ revalidatePath: vi.fn() }));
 // BrasilAPI de mentira: por padrão fora do ar (cada teste escolhe a resposta).

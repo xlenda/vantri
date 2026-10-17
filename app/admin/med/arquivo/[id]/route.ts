@@ -1,4 +1,4 @@
-import { requireUser } from "@/lib/auth/guards";
+import { requireAdmin } from "@/lib/auth/guards";
 import { getMedFile } from "@/lib/services/med";
 
 // RFC 5987: encodeURIComponent deixa ' ( ) * passarem, e o ' separa as partes do filename*.
@@ -7,7 +7,7 @@ const rfc5987 = (s: string) =>
 
 /** Anexo de defesa de MED, sempre como download (nunca abre no navegador com a origem do admin). */
 export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
-  await requireUser({ role: "admin" });
+  await requireAdmin({ perm: "med:ler" });
   const f = await getMedFile((await params).id, { role: "admin" });
   if (!f) {
     return new Response("Arquivo não encontrado.", {
