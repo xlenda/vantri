@@ -1,8 +1,8 @@
 import { timingSafeEqual } from "node:crypto";
-import { lt, sql } from "drizzle-orm";
+import { and, eq, lt, or, sql } from "drizzle-orm";
 import { sha256Hex } from "@/lib/crypto";
 import { db } from "@/lib/db/client";
-import { rateLimits, sessions } from "@/lib/db/schema";
+import { rateLimits, sessions, webhookDeliveries } from "@/lib/db/schema";
 import { logError } from "@/lib/log";
 import { expireDueCharges } from "@/lib/services/charges";
 import { pollProcessingPayouts } from "@/lib/services/payouts";
@@ -39,6 +39,24 @@ const STEPS = {
     run: async () =>
       (await db().delete(sessions).where(lt(sessions.expiresAt, sql`now()`)).returning({ id: sessions.id })).length,
     error: "falha ao limpar sessões vencidas",
+  },
+  // O Supabase grátis tem 500 MB e, cheio, vira somente leitura (o gateway inteiro para). As entregas guardam o
+  // payload (com o nome do pagador): entregue sai em 30 dias; com falha fica 90, para o lojista ver e reenviar.
+  // Os anexos de MED ficam (são a prova da defesa).
+  deleted_webhook_deliveries: {
+    run: async () =>
+      (
+        await db()
+          .delete(webhookDeliveries)
+          .where(
+            or(
+              and(eq(webhookDeliveries.status, "delivered"), lt(webhookDeliveries.createdAt, sql`now() - interval '30 days'`)),
+              and(eq(webhookDeliveries.status, "failed"), lt(webhookDeliveries.createdAt, sql`now() - interval '90 days'`)),
+            ),
+          )
+          .returning({ id: webhookDeliveries.id })
+      ).length,
+    error: "falha ao limpar entregas de webhook antigas",
   },
 } as const;
 

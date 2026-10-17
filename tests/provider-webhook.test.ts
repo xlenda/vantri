@@ -4,7 +4,17 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { GET as tick } from "@/app/api/cron/tick/route";
 import { POST as webhook } from "@/app/api/provider/webhook/route";
 import { type Db, setDb } from "@/lib/db/client";
-import { charges, ledgerEntries, merchants, payouts, rateLimits, sessions, users } from "@/lib/db/schema";
+import {
+  charges,
+  ledgerEntries,
+  merchants,
+  payouts,
+  rateLimits,
+  sessions,
+  users,
+  webhookDeliveries,
+  webhookEndpoints,
+} from "@/lib/db/schema";
 import { logError } from "@/lib/log";
 import { getBalance, postEntries } from "@/lib/money/ledger";
 import { simulator } from "@/lib/provider/simulator";
@@ -227,6 +237,7 @@ it("tick expires due charges", async () => {
     webhooks: { delivered: 0, failed: 0 },
     deleted_rate_limits: 0,
     deleted_sessions: 0,
+    deleted_webhook_deliveries: 0,
     errors: {},
   });
   const status = async (id: string) => (await d.select().from(charges).where(eq(charges.id, id)))[0].status;
@@ -252,6 +263,36 @@ it("tick cleans old rate limits and expired sessions", async () => {
   expect(body).toMatchObject({ deleted_rate_limits: 1, deleted_sessions: 1, errors: {} });
   expect((await d.select({ k: rateLimits.key }).from(rateLimits)).map((r) => r.k)).toEqual(["novo"]);
   expect((await d.select({ id: sessions.id }).from(sessions)).map((r) => r.id)).toEqual(["valida"]);
+});
+
+it("tick apaga entrega entregue com mais de 30 dias e com falha com mais de 90; o resto fica", async () => {
+  const m = await newMerchant(d, 1);
+  const [ep] = await d
+    .insert(webhookEndpoints)
+    .values({ merchantId: m, url: "https://loja.example.com/h", secretEnc: "x", events: ["charge.paid"] })
+    .returning();
+  const delivery = (eventId: string, status: "pending" | "delivered" | "failed", days: number) => ({
+    endpointId: ep.id,
+    eventId,
+    eventType: "charge.paid",
+    payload: {},
+    status,
+    // Pendente antiga fica no futuro: o dispatch da mesma rodada não pega.
+    nextAttemptAt: sql`now() + interval '1 day'`,
+    createdAt: sql`now() - make_interval(days => ${days})`,
+  });
+  await d.insert(webhookDeliveries).values([
+    delivery("entregue-velha", "delivered", 31),
+    delivery("entregue-nova", "delivered", 29),
+    delivery("falha-velha", "failed", 91),
+    delivery("falha-89d", "failed", 89),
+    delivery("pendente-velha", "pending", 200),
+  ]);
+
+  const body = await (await get("Bearer segredo-cron")).json();
+  expect(body).toMatchObject({ deleted_webhook_deliveries: 2, errors: {} });
+  const left = (await d.select({ e: webhookDeliveries.eventId }).from(webhookDeliveries)).map((r) => r.e).sort();
+  expect(left).toEqual(["entregue-nova", "falha-89d", "pendente-velha"]);
 });
 
 it("one failing tick step does not skip the others", async () => {
