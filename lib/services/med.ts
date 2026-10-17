@@ -4,6 +4,7 @@ import { charges, medCases, medEvents, medFiles } from "@/lib/db/schema";
 import { logError } from "@/lib/log";
 import { lockMerchant, postEntries } from "@/lib/money/ledger";
 import type { ProviderEvent } from "@/lib/provider/types";
+import { writeAudit } from "@/lib/services/admin/audit-util";
 import { emit } from "@/lib/services/events";
 
 export type MedCaseRow = typeof medCases.$inferSelect;
@@ -78,8 +79,13 @@ async function post(
  * Abre o caso e bloqueia o valor. O disponível pode ficar negativo (lojista já sacou): não limita.
  * MED em cobrança que não está paga, ou que faz a soma dos MEDs passar do valor dela, também é aplicado (o razão
  * espelha o parceiro: lá o valor já foi bloqueado), mas vai para o log para conciliar.
+ * `actorUserId` = admin abrindo MED de teste no simulador: eventos com source 'admin' e audit_log `med.open_test`.
+ * Sem ele, quem abriu foi o parceiro (source 'provider').
  */
-export async function applyMedOpened(e: MedOpened): Promise<"opened" | "duplicate" | "unknown"> {
+export async function applyMedOpened(
+  e: MedOpened,
+  actorUserId?: string,
+): Promise<"opened" | "duplicate" | "unknown"> {
   if (!Number.isInteger(e.amountCents) || e.amountCents <= 0) {
     throw new MedError("invalid_request", "Valor do MED inválido.");
   }
@@ -108,7 +114,12 @@ export async function applyMedOpened(e: MedOpened): Promise<"opened" | "duplicat
       ["available", -c.amountCents],
       ["blocked", c.amountCents],
     ]);
-    await tx.insert(medEvents).values({ medCaseId: c.id, type: "opened" });
+    const source = actorUserId ? "admin" : "provider";
+    await tx.insert(medEvents).values([
+      { medCaseId: c.id, type: "opened", source },
+      { medCaseId: c.id, type: "funds_blocked", source },
+    ]);
+    if (actorUserId) await writeAudit(tx, actorUserId, "med.open_test", { merchantId: c.merchantId, medCaseId: c.id });
     await emit(tx, c.merchantId, "med.opened", toMedCaseJson(c));
     const [{ total }] = await tx
       .select({ total: sql`coalesce(sum(${medCases.amountCents}), 0)`.mapWith(Number) }) // SUM é bigint
@@ -127,8 +138,14 @@ export async function applyMedOpened(e: MedOpened): Promise<"opened" | "duplicat
   });
 }
 
-/** Encerra só a partir de `open`/`defended`; evento repetido ou tardio é ignorado. */
-export async function applyMedClosed(e: MedClosed): Promise<"closed" | "duplicate" | "unknown"> {
+/**
+ * Encerra só a partir de `open`/`defended`; evento repetido ou tardio é ignorado.
+ * `actorUserId` = admin encerrando no simulador (source 'admin' + audit_log `med.close`); sem ele, o parceiro.
+ */
+export async function applyMedClosed(
+  e: MedClosed,
+  actorUserId?: string,
+): Promise<"closed" | "duplicate" | "unknown"> {
   if (e.outcome !== "merchant_won" && e.outcome !== "payer_refunded") {
     throw new MedError("invalid_request", "Desfecho do MED inválido.");
   }
@@ -157,7 +174,11 @@ export async function applyMedClosed(e: MedClosed): Promise<"closed" | "duplicat
     await tx.insert(medEvents).values({
       medCaseId: c.id,
       type: e.outcome === "merchant_won" ? "closed_merchant_won" : "closed_payer_refunded",
+      source: actorUserId ? "admin" : "provider",
     });
+    if (actorUserId) {
+      await writeAudit(tx, actorUserId, "med.close", { merchantId: c.merchantId, medCaseId: c.id, outcome: e.outcome });
+    }
     await emit(tx, c.merchantId, "med.closed", toMedCaseJson(c));
     return "closed";
   });
@@ -223,7 +244,7 @@ export async function submitDefense(
       if (c.status !== "open") throw new MedError("invalid_status", "Este caso não aceita mais defesa.");
       throw new MedError("deadline_passed", "O prazo para enviar a defesa acabou.");
     }
-    await tx.insert(medEvents).values({ medCaseId: ok.id, type: "defense_submitted" });
+    await tx.insert(medEvents).values({ medCaseId: ok.id, type: "defense_submitted", source: "merchant" });
     if (rows.length) await tx.insert(medFiles).values(rows.map((r) => ({ ...r, medCaseId: caseId })));
   });
 }
@@ -316,13 +337,14 @@ export async function listMedFiles(
 export async function listMedEvents(
   caseId: string,
   viewer: Viewer,
-): Promise<Array<{ type: MedEventRow["type"]; createdAt: Date; meta: unknown }>> {
+): Promise<Array<{ type: MedEventRow["type"]; source: MedEventRow["source"]; createdAt: Date; meta: unknown }>> {
   const owner = ownerFilter(viewer);
   if (!UUID.test(caseId) || owner === null) return [];
   return db()
-    .select({ type: medEvents.type, createdAt: medEvents.createdAt, meta: medEvents.meta })
+    .select({ type: medEvents.type, source: medEvents.source, createdAt: medEvents.createdAt, meta: medEvents.meta })
     .from(medEvents)
     .innerJoin(medCases, eq(medEvents.medCaseId, medCases.id))
     .where(and(eq(medEvents.medCaseId, caseId), owner))
-    .orderBy(medEvents.createdAt, medEvents.id); // eventos da mesma transação = mesmo created_at
+    // Eventos da mesma transação têm o mesmo created_at e o id é aleatório: 'opened' antes de 'funds_blocked'.
+    .orderBy(medEvents.createdAt, sql`${medEvents.type} <> 'opened'`, medEvents.id);
 }

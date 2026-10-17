@@ -417,4 +417,30 @@ describe("admin", () => {
     const [log] = await d.select().from(auditLog);
     expect(log).toMatchObject({ actorUserId: adminId, action: "merchant.update_fees", meta: { merchantId, ...fees } });
   });
+
+  it("cada ação de admin grava audit_log com o autor e só ids/valores no meta (nada de dado pessoal)", async () => {
+    const created = (await adminCreateMerchant(adminInput({ email: "c@exemplo.com", document: "11144477735" }), adminId))
+      .merchantId;
+    const a = (await signupMerchant(cpfInput())).merchantId;
+    const b = (await signupMerchant(cnpjInput({ email: "b@exemplo.com" }), { lookup: lookupOk([]) })).merchantId;
+    const fees = { feeInBps: 199, feeInFixedCents: 50, feeOutBps: 0, feeOutFixedCents: 150 };
+    await rejectMerchant(a, adminId);
+    await approveMerchant(b, adminId);
+    await suspendMerchant(b, adminId);
+    await reactivateMerchant(b, adminId);
+    await updateFees(b, fees, adminId);
+
+    const by = (action: string, meta: Record<string, unknown>) => ({ actorUserId: adminId, action, meta });
+    const rows = await d
+      .select({ actorUserId: auditLog.actorUserId, action: auditLog.action, meta: auditLog.meta })
+      .from(auditLog);
+    expect(rows).toEqual([
+      by("merchant.create", { merchantId: created }),
+      by("merchant.reject", { merchantId: a }),
+      by("merchant.approve", { merchantId: b }),
+      by("merchant.suspend", { merchantId: b }),
+      by("merchant.reactivate", { merchantId: b }),
+      by("merchant.update_fees", { merchantId: b, ...fees }),
+    ]);
+  });
 });

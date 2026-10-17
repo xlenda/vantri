@@ -5,9 +5,10 @@ import { type CnpjLookup, lookupCnpj } from "@/lib/br/cnpj-lookup";
 import { isValidCnpj, isValidCpf, normalizeDocument, onlyDigits, SEGMENTS } from "@/lib/br/documents";
 import { decrypt, encrypt, hmacHex, randomBase62 } from "@/lib/crypto";
 import { db, type Tx } from "@/lib/db/client";
-import { auditLog, merchants, users } from "@/lib/db/schema";
+import { merchants, users } from "@/lib/db/schema";
 import { getProvider } from "@/lib/provider";
 import type { PixProvider } from "@/lib/provider/types";
+import { writeAudit } from "@/lib/services/admin/audit-util";
 import { parseOr } from "@/lib/validation";
 
 export type MerchantErrorCode =
@@ -140,9 +141,6 @@ async function provision(tx: Tx, account: Parameters<PixProvider["createAccount"
     .where(eq(merchants.id, account.merchantId));
 }
 
-const audit = (tx: Tx, actorUserId: string, action: string, meta: Record<string, unknown>) =>
-  tx.insert(auditLog).values({ actorUserId, action, meta });
-
 export async function signupMerchant(
   input: unknown,
   deps: { lookup?: typeof lookupCnpj } = {},
@@ -181,7 +179,7 @@ export async function adminCreateMerchant(
         documentType: data.documentType,
         email: data.email,
       });
-      await audit(tx, actorId, "merchant.create", { merchantId: ids.merchantId });
+      await writeAudit(tx, actorId, "merchant.create", { merchantId: ids.merchantId });
       return ids;
     })
     .catch(rethrowTaken);
@@ -241,7 +239,7 @@ export async function approveMerchant(
       email: u.email,
     });
     if (cnpjCheck === "receita") await tx.update(merchants).set({ needsManualReview: false }).where(eq(merchants.id, id));
-    await audit(tx, actorId, "merchant.approve", { merchantId: id, ...(cnpjCheck && { cnpjCheck }) });
+    await writeAudit(tx, actorId, "merchant.approve", { merchantId: id, ...(cnpjCheck && { cnpjCheck }) });
   });
 }
 
@@ -249,7 +247,7 @@ const transition = (from: Status, to: Status, action: string) => (id: string, ac
   db().transaction(async (tx) => {
     await lockInStatus(tx, id, from);
     await tx.update(merchants).set({ status: to }).where(eq(merchants.id, id));
-    await audit(tx, actorId, action, { merchantId: id });
+    await writeAudit(tx, actorId, action, { merchantId: id });
   });
 
 export const rejectMerchant = transition("pending", "rejected", "merchant.reject");
@@ -263,6 +261,6 @@ export async function updateFees(id: string, fees: Fees, actorId: string): Promi
   await db().transaction(async (tx) => {
     const [m] = await tx.update(merchants).set(f).where(eq(merchants.id, id)).returning({ id: merchants.id });
     if (!m) throw notFound();
-    await audit(tx, actorId, "merchant.update_fees", { merchantId: id, ...f });
+    await writeAudit(tx, actorId, "merchant.update_fees", { merchantId: id, ...f });
   });
 }
