@@ -23,7 +23,7 @@ export async function seedAdmin(rawEmail: string): Promise<{ email: string; temp
   const tempPassword = randomBase62(16);
   await db()
     .insert(users)
-    .values({ email, passwordHash: await hashPassword(tempPassword), role: "admin", mustChangePassword: true });
+    .values({ email, passwordHash: await hashPassword(tempPassword), role: "admin", adminRole: "admin", mustChangePassword: true });
   return { email, tempPassword };
 }
 

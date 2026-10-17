@@ -53,6 +53,8 @@ export const users = pgTable(
     email: text("email").notNull().unique(),
     passwordHash: text("password_hash").notNull(),
     role: text("role", { enum: ["admin", "merchant"] }).notNull(),
+    // Sub-papel do admin; só faz sentido quando role='admin'. Lojista e admins antigos ficam null.
+    adminRole: text("admin_role", { enum: ["admin", "operador", "suporte"] }),
     merchantId: uuid("merchant_id").references(() => merchants.id),
     totpSecretEnc: text("totp_secret_enc"),
     totpEnabled: boolean("totp_enabled").notNull().default(false),

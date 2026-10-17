@@ -93,6 +93,7 @@ export async function resolveSession(token: string) {
         id: users.id,
         email: users.email,
         role: users.role,
+        adminRole: users.adminRole, // sub-papel do admin (null para lojista/admin antigo)
         merchantId: users.merchantId,
         totpEnabled: users.totpEnabled,
         mustChangePassword: users.mustChangePassword,

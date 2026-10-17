@@ -1,5 +1,6 @@
 import { cookies } from "next/headers";
 import { notFound, redirect } from "next/navigation";
+import { type Perm, pode } from "@/lib/auth/perms";
 import { type Access, checkAccess, resolveSession, SESSION_COOKIE, type SessionInfo } from "@/lib/auth/session";
 
 async function sessionToken(): Promise<string | undefined> {
@@ -21,4 +22,15 @@ export async function requireUser(opts: { role: "admin" | "merchant" }): Promise
   if (r.kind === "redirect") redirect(r.to);
   if (r.kind === "not_found") notFound();
   return { user: r.user, merchant: r.merchant };
+}
+
+/**
+ * Guarda de toda página, Server Action e route handler do /admin: a porta grossa de admin
+ * (sessão + 2FA + troca de senha + papel) MAIS a permissão do sub-papel. Controle de acesso é
+ * sempre aqui, no servidor — esconder botão no front nunca basta. Sem a permissão: notFound().
+ */
+export async function requireAdmin(opts: { perm: Perm }): Promise<{ user: SessionInfo["user"] }> {
+  const { user } = await requireUser({ role: "admin" });
+  if (!pode(user.adminRole, opts.perm)) notFound();
+  return { user };
 }
