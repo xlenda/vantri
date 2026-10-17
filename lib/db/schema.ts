@@ -123,7 +123,37 @@ export const charges = pgTable(
     endToEndId: text("end_to_end_id"),
     createdAt: createdAt(),
   },
-  (t) => [unique("charges_merchant_external_ref_unique").on(t.merchantId, t.externalRef)],
+  (t) => [
+    unique("charges_merchant_external_ref_unique").on(t.merchantId, t.externalRef),
+    // Busca por E2E e por txid dentro do lojista.
+    index("charges_merchant_end_to_end_id_idx").on(t.merchantId, t.endToEndId),
+    index("charges_merchant_txid_idx").on(t.merchantId, t.txid),
+  ],
+);
+
+// Lote de saque: uma solicitação quebrada em parcelas (cada parcela é um payout com batch_id/batch_index).
+// Retomada persiste no banco (failed_at_index), não só na memória.
+export const payoutBatches = pgTable(
+  "payout_batches",
+  {
+    id: id(),
+    merchantId: uuid("merchant_id")
+      .notNull()
+      .references(() => merchants.id),
+    totalCents: integer("total_cents").notNull(),
+    chunkCents: integer("chunk_cents").notNull(), // teto por parcela no momento
+    count: integer("count").notNull(), // nº de parcelas
+    pixKey: text("pix_key").notNull(),
+    pixKeyType: text("pix_key_type", { enum: ["cpf", "cnpj", "email", "phone", "evp"] }).notNull(),
+    description: text("description"),
+    status: text("status", { enum: ["processing", "completed", "partial", "failed"] }).notNull(),
+    // Índice da 1ª parcela que falhou; null = nenhuma falhou ainda.
+    failedAtIndex: integer("failed_at_index"),
+    idempotencyKey: text("idempotency_key").notNull(),
+    requestHash: text("request_hash").notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [unique("payout_batches_merchant_idempotency_key_unique").on(t.merchantId, t.idempotencyKey)],
 );
 
 export const payouts = pgTable(
@@ -133,6 +163,9 @@ export const payouts = pgTable(
     merchantId: uuid("merchant_id")
       .notNull()
       .references(() => merchants.id),
+    // Saque avulso = os dois null. Parcela de lote = batch_id + batch_index.
+    batchId: uuid("batch_id").references(() => payoutBatches.id),
+    batchIndex: integer("batch_index"),
     amountCents: integer("amount_cents").notNull(),
     feeCents: integer("fee_cents").notNull(),
     pixKey: text("pix_key").notNull(),
@@ -210,6 +243,23 @@ export const medFiles = pgTable("med_files", {
   createdAt: createdAt(),
 });
 
+// Linha do tempo do MED: gravado em applyMedOpened/submitDefense/applyMedClosed.
+export const medEvents = pgTable(
+  "med_events",
+  {
+    id: id(),
+    medCaseId: uuid("med_case_id")
+      .notNull()
+      .references(() => medCases.id, { onDelete: "cascade" }),
+    type: text("type", {
+      enum: ["opened", "defense_submitted", "closed_merchant_won", "closed_payer_refunded"],
+    }).notNull(),
+    meta: jsonb("meta").notNull().default({}),
+    createdAt: createdAt(),
+  },
+  (t) => [index("med_events_med_case_id_idx").on(t.medCaseId)],
+);
+
 export const webhookEndpoints = pgTable("webhook_endpoints", {
   id: id(),
   merchantId: uuid("merchant_id")
@@ -218,6 +268,7 @@ export const webhookEndpoints = pgTable("webhook_endpoints", {
   url: text("url").notNull(),
   secretEnc: text("secret_enc").notNull(),
   events: text("events").array().notNull(),
+  description: text("description"), // nome do endpoint no painel
   active: boolean("active").notNull().default(true),
   createdAt: createdAt(),
 });
@@ -242,6 +293,24 @@ export const webhookDeliveries = pgTable(
     createdAt: createdAt(),
   },
   (t) => [index("webhook_deliveries_due_idx").on(t.status, t.nextAttemptAt)],
+);
+
+// Histórico de cada tentativa de entrega de webhook (diagnóstico no painel).
+export const webhookAttempts = pgTable(
+  "webhook_attempts",
+  {
+    id: id(),
+    deliveryId: uuid("delivery_id")
+      .notNull()
+      .references(() => webhookDeliveries.id, { onDelete: "cascade" }),
+    n: integer("n").notNull(), // nº da tentativa, 1-based
+    statusCode: integer("status_code"),
+    latencyMs: integer("latency_ms"),
+    error: text("error"), // só categoria, nunca o erro cru
+    responseSnippet: text("response_snippet"), // ≤ 1 KB, trecho da resposta
+    createdAt: createdAt(),
+  },
+  (t) => [index("webhook_attempts_delivery_id_idx").on(t.deliveryId)],
 );
 
 export const rateLimits = pgTable("rate_limits", {
