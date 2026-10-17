@@ -9,7 +9,7 @@ import { ChargeError, type ChargeErrorCode } from "@/lib/services/charges";
 import { MedError, type MedErrorCode } from "@/lib/services/med";
 import { PayoutError, type PayoutErrorCode } from "@/lib/services/payouts";
 import { parseOr } from "@/lib/validation";
-import { ApiKeyError, type Scope } from "./keys";
+import { ApiKeyError, type Scope, testIpAgainstAllowlist } from "./keys";
 
 // Tipado pelos códigos dos serviços: código novo sem status aqui não compila.
 const STATUS: Record<ChargeErrorCode | PayoutErrorCode | MedErrorCode | "unauthorized" | "forbidden" | "rate_limited", number> =
@@ -119,7 +119,8 @@ export function withApi<P extends Record<string, string> = Record<string, string
       ids.merchant = k.merchantId;
       if (k.ipAllowlist.length) {
         const ip = clientIp(req);
-        if (!ip || !k.ipAllowlist.includes(ip)) return fail("forbidden", "Este IP não está na lista de IPs permitidos da chave.");
+        if (!ip || !testIpAgainstAllowlist(k.ipAllowlist, ip))
+          return fail("forbidden", "Este IP não está na lista de IPs permitidos da chave.");
       }
       if (k.merchantStatus !== "active") return fail("merchant_inactive", "Sua conta não está ativa.");
       if (!k.scopes.includes(scope)) return fail("forbidden", `Esta chave não tem o escopo ${scope}.`);
