@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { generate } from "otplib";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { simulatePaymentAction } from "@/app/painel/cobrancas/actions";
+import { createChargeAction, simulatePaymentAction } from "@/app/painel/cobrancas/actions";
 import { createKeyAction, resendDeliveryAction } from "@/app/painel/integracoes/actions";
 import { createPayoutAction } from "@/app/painel/saques/actions";
 import { encrypt } from "@/lib/crypto";
@@ -247,4 +247,12 @@ describe("eventos fora do webhook do provedor: envio agendado na hora (after)", 
     expect((await d.select().from(webhookDeliveries))[0].status).toBe("pending");
     expect(afterTasks).toHaveLength(1);
   });
+});
+
+it("cobrança de conta de demonstração com o parceiro real ligado: recusada com a mensagem do serviço", async () => {
+  vi.stubEnv("PIX_PROVIDER", "parceiro");
+  expect(await createChargeAction(undefined, form({ amount: "149,90", description: "", expiresIn: "3600" }))).toMatchObject({
+    error: expect.stringMatching(/^Esta conta é do ambiente de demonstração \(Pix simulado\)/),
+  });
+  expect(await d.select().from(charges)).toHaveLength(0);
 });

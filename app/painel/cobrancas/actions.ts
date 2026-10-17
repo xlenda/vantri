@@ -36,7 +36,9 @@ export async function createChargeAction(prev: ChargeFormState, fd: FormData): P
     id = charge.id;
   } catch (e) {
     // Mensagens dos códigos de negócio já são em português e sem dado interno.
-    if (e instanceof ChargeError && (e.code === "invalid_request" || e.code === "merchant_inactive")) return fail(e.message);
+    if (e instanceof ChargeError && ["invalid_request", "merchant_inactive", "simulated_account"].includes(e.code)) {
+      return fail(e.message);
+    }
     logError("painel: criar cobrança falhou", e, { merchant: merchant.id });
     return fail(e instanceof ChargeError && e.code === "provider_error" ? e.message : GENERIC_ERROR);
   }

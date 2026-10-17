@@ -7,20 +7,22 @@ import { db } from "@/lib/db/client";
 import { charges, merchants } from "@/lib/db/schema";
 import { computeFee } from "@/lib/money/fees";
 import { lockMerchant, postEntries } from "@/lib/money/ledger";
-import { getProvider } from "@/lib/provider";
+import { getProvider, SIMULATED_ACCOUNT_MESSAGE, simulatedAccountOutsideSimulator } from "@/lib/provider";
 import type { ProviderEvent } from "@/lib/provider/types";
 import { emit } from "@/lib/services/events";
 import { parseOr } from "@/lib/validation";
 
 export type ChargeRow = typeof charges.$inferSelect;
 
-// merchant_inactive: lojista que não está `active` (a API responde 403).
+// merchant_inactive: lojista que não está `active`; simulated_account: conta do simulador com o parceiro real ligado
+// (as duas: a API responde 403).
 export type ChargeErrorCode =
   | "invalid_request"
   | "idempotency_conflict"
   | "not_found"
   | "provider_error"
-  | "merchant_inactive";
+  | "merchant_inactive"
+  | "simulated_account";
 
 export class ChargeError extends Error {
   constructor(
@@ -106,6 +108,9 @@ export async function createCharge(
   const [m] = isUuid(merchantId) ? await db().select().from(merchants).where(eq(merchants.id, merchantId)) : [];
   if (m?.status !== "active" || !m.providerAccountId) {
     throw new ChargeError("merchant_inactive", "Sua conta não está ativa para receber cobranças.");
+  }
+  if (simulatedAccountOutsideSimulator(m.providerAccountId)) {
+    throw new ChargeError("simulated_account", SIMULATED_ACCOUNT_MESSAGE);
   }
 
   const existing = await findByRef(merchantId, data.external_ref);

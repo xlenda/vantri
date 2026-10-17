@@ -125,6 +125,7 @@ const DESCRIPTION = [
   "| `unauthorized` | 401 | chave ausente, inválida ou revogada |",
   "| `forbidden` | 403 | chave sem o escopo ou IP fora da lista |",
   "| `merchant_inactive` | 403 | conta não está ativa |",
+  "| `simulated_account` | 403 | conta do ambiente de demonstração (Pix simulado): não movimenta dinheiro de verdade |",
   "| `not_found` | 404 | recurso não existe ou é de outra conta |",
   "| `idempotency_conflict` | 409 | `external_ref` ou `Idempotency-Key` já usados com outro conteúdo |",
   "| `insufficient_balance` | 422 | saldo disponível não cobre o saque e a tarifa |",
@@ -380,7 +381,10 @@ export const openapi = {
     responses: {
       InvalidRequest: body("Requisição inválida (`invalid_request` ou `insufficient_balance`).", schema("Error")),
       Unauthorized: body("Chave ausente, inválida ou revogada (`unauthorized`).", schema("Error")),
-      Forbidden: body("Sem o escopo, IP fora da lista (`forbidden`) ou conta inativa (`merchant_inactive`).", schema("Error")),
+      Forbidden: body(
+        "Sem o escopo, IP fora da lista (`forbidden`), conta inativa (`merchant_inactive`) ou conta de demonstração (`simulated_account`).",
+        schema("Error"),
+      ),
       NotFound: body("Não existe ou é de outra conta (`not_found`).", schema("Error")),
       Conflict: body("Chave de idempotência já usada com outro conteúdo (`idempotency_conflict`).", schema("Error")),
       RateLimited: {
@@ -408,6 +412,7 @@ export const openapi = {
                   "unauthorized",
                   "forbidden",
                   "merchant_inactive",
+                  "simulated_account",
                   "not_found",
                   "idempotency_conflict",
                   "insufficient_balance",

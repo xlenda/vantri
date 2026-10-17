@@ -18,6 +18,7 @@ const STATUS: Record<ChargeErrorCode | PayoutErrorCode | MedErrorCode | "unautho
     unauthorized: 401,
     forbidden: 403,
     merchant_inactive: 403,
+    simulated_account: 403,
     not_found: 404,
     idempotency_conflict: 409,
     insufficient_balance: 422,

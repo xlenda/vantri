@@ -7,7 +7,7 @@ import { merchants, payouts } from "@/lib/db/schema";
 import { logError } from "@/lib/log";
 import { computeFee } from "@/lib/money/fees";
 import { getBalance, type LedgerEntry, lockMerchant, postEntries } from "@/lib/money/ledger";
-import { getProvider } from "@/lib/provider";
+import { getProvider, SIMULATED_ACCOUNT_MESSAGE, simulatedAccountOutsideSimulator } from "@/lib/provider";
 import type { PixKeyType, PixProvider } from "@/lib/provider/types";
 import { emit } from "@/lib/services/events";
 import { parseOr } from "@/lib/validation";
@@ -20,7 +20,8 @@ export type PayoutErrorCode =
   | "idempotency_conflict"
   | "insufficient_balance"
   | "not_found"
-  | "merchant_inactive";
+  | "merchant_inactive"
+  | "simulated_account";
 
 export class PayoutError extends Error {
   constructor(
@@ -146,6 +147,9 @@ export async function createPayout(
     if (!m) throw new PayoutError("not_found", "Cliente não encontrado.");
     if (m.status !== "active" || !m.providerAccountId) {
       throw new PayoutError("merchant_inactive", "Conta não está ativa para saques.");
+    }
+    if (simulatedAccountOutsideSimulator(m.providerAccountId)) {
+      throw new PayoutError("simulated_account", SIMULATED_ACCOUNT_MESSAGE);
     }
 
     const fee = computeFee(data.amount, m.feeOutBps, m.feeOutFixedCents);

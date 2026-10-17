@@ -1,5 +1,5 @@
 import { eq } from "drizzle-orm";
-import { beforeAll, beforeEach, expect, it } from "vitest";
+import { beforeAll, beforeEach, expect, it, vi } from "vitest";
 import { type Db, setDb } from "@/lib/db/client";
 import { charges, ledgerEntries, merchants, webhookDeliveries, webhookEndpoints } from "@/lib/db/schema";
 import { getBalance } from "@/lib/money/ledger";
@@ -192,11 +192,11 @@ it("rejects when merchant not active", async () => {
 
 it("provider failure → provider_error, nothing written", async () => {
   const m = await activeMerchant(1);
-  process.env.PIX_PROVIDER = "";
+  const spy = vi.spyOn(simulator, "createCharge").mockRejectedValueOnce(new Error("parceiro fora do ar"));
   try {
     await rejects(createCharge(m, { external_ref: "x", amount: 1000 }), "provider_error");
   } finally {
-    process.env.PIX_PROVIDER = "simulator";
+    spy.mockRestore();
   }
   expect(await d.select().from(charges)).toHaveLength(0);
 });
