@@ -9,6 +9,7 @@ import { computeFee } from "@/lib/money/fees";
 import { getBalance, type LedgerEntry, lockMerchant, postEntries } from "@/lib/money/ledger";
 import { getProvider, SIMULATED_ACCOUNT_MESSAGE, simulatedAccountOutsideSimulator } from "@/lib/provider";
 import type { PixKeyType, PixProvider } from "@/lib/provider/types";
+import { writeAudit } from "@/lib/services/admin/audit-util";
 import { emit } from "@/lib/services/events";
 import { parseOr } from "@/lib/validation";
 
@@ -311,33 +312,58 @@ export async function listPayouts(
 }
 
 /**
- * Cron: saques em processing há mais de `olderThanSec`. Com id do provedor → getPayout; sem (a chamada original
- * falhou) → reenvia com a mesma chave de idempotência. Devolve quantos chegaram a estado final.
+ * Um saque em processing: com id do provedor → getPayout; sem (a chamada original falhou) → reenvia com a mesma
+ * chave de idempotência. Devolve o status depois. Saque já final: nada a fazer, nem auditoria. Cada consulta/reenvio
+ * entra no audit_log (`payout.repoll`/`payout.resend`, autor null = cron): é a linha do tempo do saque no admin.
  */
-export async function pollProcessingPayouts(olderThanSec = 120): Promise<number> {
+export async function repollPayout(payoutId: string, actorUserId: string | null = null): Promise<PayoutRow["status"]> {
+  const [r] = UUID.test(payoutId)
+    ? await db()
+        .select({ payout: payouts, providerAccountId: merchants.providerAccountId })
+        .from(payouts)
+        .innerJoin(merchants, eq(merchants.id, payouts.merchantId))
+        .where(eq(payouts.id, payoutId))
+    : [];
+  if (!r) throw new PayoutError("not_found", "Saque não encontrado.");
+  const { payout: p, providerAccountId } = r;
+  if (p.status !== "processing") return p.status;
   const provider = getProvider();
+  if (p.providerPayoutId) await applyPayoutResult(p.id, await provider.getPayout(p.providerPayoutId));
+  else if (providerAccountId) await submit(provider, p, providerAccountId);
+  else {
+    console.error(`saque ${p.id}: lojista ${p.merchantId} sem conta no provedor, reenvio pulado`);
+    return p.status;
+  }
+  const { status } = await byId(p.id);
+  // ponytail: uma linha por consulta do cron enquanto o saque não fecha; agregar se a fila de presos crescer.
+  await db().transaction((tx) =>
+    writeAudit(tx, actorUserId, p.providerPayoutId ? "payout.repoll" : "payout.resend", {
+      merchantId: p.merchantId,
+      payoutId: p.id,
+      status,
+    }),
+  );
+  return status;
+}
+
+/** Cron: saques em processing há mais de `olderThanSec`, um a um por repollPayout. Devolve quantos chegaram a estado final. */
+export async function pollProcessingPayouts(olderThanSec = 120): Promise<number> {
+  getProvider(); // provedor mal configurado: o passo do cron falha inteiro, antes de olhar a fila
   // ponytail: 50 por rodada, em série; paralelizar se a fila crescer além do que o tick dá conta.
   const rows = await db()
-    .select({ payout: payouts, providerAccountId: merchants.providerAccountId })
+    .select({ id: payouts.id })
     .from(payouts)
-    .innerJoin(merchants, eq(merchants.id, payouts.merchantId))
     .where(
       and(eq(payouts.status, "processing"), lt(payouts.createdAt, sql`now() - interval '1 second' * ${olderThanSec}`)),
     )
     .orderBy(asc(payouts.createdAt))
     .limit(50);
   let settled = 0;
-  for (const { payout: p, providerAccountId } of rows) {
+  for (const { id } of rows) {
     try {
-      if (p.providerPayoutId) await applyPayoutResult(p.id, await provider.getPayout(p.providerPayoutId));
-      else if (providerAccountId) await submit(provider, p, providerAccountId);
-      else {
-        console.error(`saque ${p.id}: lojista ${p.merchantId} sem conta no provedor, reenvio pulado`);
-        continue;
-      }
-      if ((await byId(p.id)).status !== "processing") settled++;
+      if ((await repollPayout(id)) !== "processing") settled++;
     } catch (e) {
-      logError("saque: consulta ao provedor falhou", e, { payout: p.id });
+      logError("saque: consulta ao provedor falhou", e, { payout: id });
     }
   }
   return settled;
