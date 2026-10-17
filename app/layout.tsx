@@ -9,7 +9,7 @@ export const metadata: Metadata = { metadataBase: new URL(SITE_URL), title: "Van
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="pt-BR" className={jakarta.variable}>
+    <html lang="pt-BR" className={jakarta.variable} data-scroll-behavior="smooth">
       <body className="font-sans antialiased">{children}</body>
     </html>
   );
