@@ -3,9 +3,11 @@ import { eq } from "drizzle-orm";
 import { generate } from "otplib";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createKeyAction } from "@/app/painel/integracoes/actions";
+import { createPayoutAction } from "@/app/painel/saques/actions";
 import { encrypt } from "@/lib/crypto";
 import { type Db, setDb } from "@/lib/db/client";
-import { apiKeys, merchants, users } from "@/lib/db/schema";
+import { apiKeys, merchants, payouts, users } from "@/lib/db/schema";
+import { getBalance, postEntries } from "@/lib/money/ledger";
 import { createTestDb } from "./helpers/db";
 import { newMerchant } from "./helpers/factories";
 
@@ -122,5 +124,82 @@ describe("criar chave de API (createKeyAction)", () => {
     auth.session = null;
     await expect(createKeyAction(undefined, form({ ...KEY, code: await codeAt(0) }))).rejects.toThrow("NEXT_REDIRECT");
     expect(await keys()).toHaveLength(0);
+  });
+});
+
+describe("saque pelo painel (createPayoutAction)", () => {
+  const PAYOUT = { idempotencyKey: "a".repeat(24), amount: "150,00", pixKeyType: "email", pixKey: "fornecedor@exemplo.com", description: "" };
+  const all = () => d.select().from(payouts);
+
+  beforeEach(async () => {
+    await d.transaction((tx) =>
+      postEntries(tx, [
+        {
+          merchantId,
+          amountCents: 100_000,
+          bucket: "available",
+          kind: "adjustment",
+          refType: "manual",
+          refId: "6c0b1d3e-9f1a-4f7e-8a9b-1c2d3e4f5a6b",
+        },
+      ]),
+    );
+  });
+
+  it("código errado não cria saque nem mexe no saldo", async () => {
+    const right = await codeAt(0);
+    const wrong = right === "000000" ? "111111" : "000000";
+    expect(await createPayoutAction(undefined, form({ ...PAYOUT, code: wrong }))).toMatchObject({
+      error: WRONG_CODE,
+      values: { amount: "150,00", pixKey: "fornecedor@exemplo.com" },
+    });
+    expect(await createPayoutAction(undefined, form(PAYOUT))).toMatchObject({
+      error: "Digite o código de 6 dígitos do app autenticador.",
+    });
+    expect(await all()).toHaveLength(0);
+    expect((await getBalance(merchantId)).available).toBe(100_000);
+  });
+
+  it("chave Pix inválida é recusada antes do 2FA e não gasta o código", async () => {
+    const code = await codeAt(0);
+    expect(await createPayoutAction(undefined, form({ ...PAYOUT, pixKeyType: "cpf", pixKey: "529.982.247-24", code }))).toMatchObject({
+      error: "Chave Pix inválida para CPF. Confira e tente de novo.",
+    });
+    expect(await lastStep()).toBeNull();
+    expect(await all()).toHaveLength(0);
+
+    // O mesmo código continua valendo para o saque corrigido.
+    await expect(createPayoutAction(undefined, form({ ...PAYOUT, code }))).rejects.toThrow(/^NEXT_REDIRECT \/painel\/saques\?feito=/);
+    expect(await all()).toHaveLength(1);
+  });
+
+  it("mesma chave de idempotência: aviso de saque repetido e um saque só", async () => {
+    await expect(createPayoutAction(undefined, form({ ...PAYOUT, code: await codeAt(0) }))).rejects.toThrow(
+      /^NEXT_REDIRECT \/painel\/saques\?feito=[0-9a-f-]{36}$/,
+    );
+    const [p] = await all();
+    // Reenvio do mesmo formulário (código seguinte): volta o mesmo saque, com o aviso de repetido.
+    await expect(createPayoutAction(undefined, form({ ...PAYOUT, code: await codeAt(1) }))).rejects.toThrow(
+      `NEXT_REDIRECT /painel/saques?feito=${p.id}&repetido=1`,
+    );
+    expect(await all()).toHaveLength(1);
+    expect(p).toMatchObject({ merchantId, amountCents: 15_000, feeCents: 100, status: "completed" });
+    expect((await getBalance(merchantId)).available).toBe(100_000 - 15_000 - 100);
+
+    // Mesma chave com outro valor: recusado com aviso, sem saque novo.
+    expect(await createPayoutAction(undefined, form({ ...PAYOUT, amount: "200,00", code: await codeAt(-1) }))).toMatchObject({
+      error: WRONG_CODE, // passo anterior ao já usado também não vale
+    });
+    await d.update(users).set({ totpLastStep: null }).where(eq(users.id, userId));
+    expect(await createPayoutAction(undefined, form({ ...PAYOUT, amount: "200,00", code: await codeAt(0) }))).toMatchObject({
+      error: "Este formulário já foi usado em outro saque. Recarregue a página para fazer um saque novo.",
+    });
+    expect(await all()).toHaveLength(1);
+  });
+
+  it("sem sessão de lojista nada é sacado", async () => {
+    auth.session = null;
+    await expect(createPayoutAction(undefined, form({ ...PAYOUT, code: await codeAt(0) }))).rejects.toThrow("NEXT_REDIRECT /entrar");
+    expect(await all()).toHaveLength(0);
   });
 });
