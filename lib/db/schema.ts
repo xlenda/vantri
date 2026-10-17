@@ -88,7 +88,7 @@ export const accessLogs = pgTable("access_logs", {
   id: id(),
   userId: uuid("user_id").references(() => users.id, { onDelete: "set null" }),
   ip: text("ip").notNull(),
-  event: text("event", { enum: ["login", "login_failed"] }).notNull(),
+  event: text("event", { enum: ["login", "login_failed", "api_call", "session_use"] }).notNull(),
   createdAt: createdAt(),
 });
 
