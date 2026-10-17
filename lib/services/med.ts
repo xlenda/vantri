@@ -1,12 +1,13 @@
 import { and, desc, eq, gt, inArray, sql } from "drizzle-orm";
 import { db, type Tx } from "@/lib/db/client";
-import { charges, medCases, medFiles } from "@/lib/db/schema";
+import { charges, medCases, medEvents, medFiles } from "@/lib/db/schema";
 import { logError } from "@/lib/log";
 import { lockMerchant, postEntries } from "@/lib/money/ledger";
 import type { ProviderEvent } from "@/lib/provider/types";
 import { emit } from "@/lib/services/events";
 
 export type MedCaseRow = typeof medCases.$inferSelect;
+type MedEventRow = typeof medEvents.$inferSelect;
 type MedStatus = MedCaseRow["status"];
 type MedOpened = Extract<ProviderEvent, { type: "med.opened" }>;
 type MedClosed = Extract<ProviderEvent, { type: "med.closed" }>;
@@ -107,6 +108,7 @@ export async function applyMedOpened(e: MedOpened): Promise<"opened" | "duplicat
       ["available", -c.amountCents],
       ["blocked", c.amountCents],
     ]);
+    await tx.insert(medEvents).values({ medCaseId: c.id, type: "opened" });
     await emit(tx, c.merchantId, "med.opened", toMedCaseJson(c));
     const [{ total }] = await tx
       .select({ total: sql`coalesce(sum(${medCases.amountCents}), 0)`.mapWith(Number) }) // SUM é bigint
@@ -152,6 +154,10 @@ export async function applyMedClosed(e: MedClosed): Promise<"closed" | "duplicat
     } else {
       await post(tx, c, "med_debit", [["blocked", -x]]);
     }
+    await tx.insert(medEvents).values({
+      medCaseId: c.id,
+      type: e.outcome === "merchant_won" ? "closed_merchant_won" : "closed_payer_refunded",
+    });
     await emit(tx, c.merchantId, "med.closed", toMedCaseJson(c));
     return "closed";
   });
@@ -217,6 +223,7 @@ export async function submitDefense(
       if (c.status !== "open") throw new MedError("invalid_status", "Este caso não aceita mais defesa.");
       throw new MedError("deadline_passed", "O prazo para enviar a defesa acabou.");
     }
+    await tx.insert(medEvents).values({ medCaseId: ok.id, type: "defense_submitted" });
     if (rows.length) await tx.insert(medFiles).values(rows.map((r) => ({ ...r, medCaseId: caseId })));
   });
 }
@@ -303,4 +310,19 @@ export async function listMedFiles(
     .innerJoin(medCases, eq(medFiles.medCaseId, medCases.id))
     .where(and(eq(medFiles.medCaseId, caseId), owner))
     .orderBy(medFiles.createdAt, medFiles.filename, medFiles.id); // mesma defesa = mesmo created_at
+}
+
+/** Linha do tempo de um caso, mais antigos primeiro. Mesma regra de dono de `getMedFile` (outro lojista → []). */
+export async function listMedEvents(
+  caseId: string,
+  viewer: Viewer,
+): Promise<Array<{ type: MedEventRow["type"]; createdAt: Date; meta: unknown }>> {
+  const owner = ownerFilter(viewer);
+  if (!UUID.test(caseId) || owner === null) return [];
+  return db()
+    .select({ type: medEvents.type, createdAt: medEvents.createdAt, meta: medEvents.meta })
+    .from(medEvents)
+    .innerJoin(medCases, eq(medEvents.medCaseId, medCases.id))
+    .where(and(eq(medEvents.medCaseId, caseId), owner))
+    .orderBy(medEvents.createdAt, medEvents.id); // eventos da mesma transação = mesmo created_at
 }
