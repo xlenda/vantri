@@ -10,7 +10,7 @@ import { brl, dateTime as dataHora } from "@/lib/br/money";
 import { randomBase62 } from "@/lib/crypto";
 import { getBalance } from "@/lib/money/ledger";
 import { isSimulator } from "@/lib/provider";
-import { countPayoutsByStatus, getPayout, listPayouts, type PayoutRow } from "@/lib/services/payouts";
+import { countPayoutsByStatus, getPayout, listOpenBatches, listPayouts, type PayoutRow } from "@/lib/services/payouts";
 import { failureReason, feeText, maskPixKey, painelSession, PIX_KEY_TYPES, uuidOrUndefined, withQuery } from "../lib";
 import { Pager } from "../pager";
 import { PayoutForm } from "./payout-form";
@@ -34,11 +34,12 @@ export default async function SaquesPage({ searchParams }: { searchParams: Promi
   const q = typeof sp.q === "string" ? sp.q.trim() : "";
   const cursor = uuidOrUndefined(sp.cursor);
   const doneId = uuidOrUndefined(sp.feito);
-  const [balance, list, counts, done] = await Promise.all([
+  const [balance, list, counts, done, openBatches] = await Promise.all([
     getBalance(merchant.id),
     listPayouts(merchant.id, { cursor, limit: 20, status, q }),
     countPayoutsByStatus(merchant.id, q),
     doneId ? getPayout(merchant.id, doneId) : null, // de outro lojista → null
+    listOpenBatches(merchant.id),
   ]);
   const qs = (p: Record<string, string | undefined>) => withQuery("/painel/saques", p);
 
@@ -50,6 +51,21 @@ export default async function SaquesPage({ searchParams }: { searchParams: Promi
       </header>
 
       {done && <DoneAlert p={done} replayed={sp.repetido === "1"} simulator={isSimulator()} />}
+
+      {openBatches.length > 0 && (
+        <Alert tone="info">
+          Saques parcelados que não terminaram:{" "}
+          {openBatches.map((b, i) => (
+            <span key={b.id}>
+              {i > 0 && " · "}
+              <Link href={`/painel/saques/novo?lote=${b.id}`} className="font-semibold text-brand hover:underline">
+                <span className="valor-sensivel">{brl(b.totalCents)}</span> em {b.count} parcelas
+                {b.status === "partial" ? " (parou numa parcela)" : " (em andamento)"}
+              </Link>
+            </span>
+          ))}
+        </Alert>
+      )}
 
       <div className="grid gap-6 lg:grid-cols-[minmax(0,24rem)_minmax(0,1fr)]">
         <Card className="h-fit">
@@ -159,21 +175,30 @@ function DoneAlert({ p, replayed, simulator }: { p: PayoutRow; replayed: boolean
   if (replayed) return <Alert tone="info">Este saque já tinha sido enviado (mesma solicitação).</Alert>;
   // No simulador nenhum Pix sai de verdade: o texto não pode dizer que o dinheiro foi enviado.
   const saque = simulator ? "saque simulado" : "saque";
+  // Como na lista: valor some com "ocultar saldos" e a chave do favorecido aparece mascarada.
+  const valor = <span className="valor-sensivel">{brl(p.amountCents)}</span>;
+  const chave = maskPixKey(p.pixKeyType, p.pixKey);
   if (p.status === "failed") {
     return (
       <Alert>
-        O {saque} de {brl(p.amountCents)} não foi concluído{simulator ? "" : " pelo banco"}. Motivo:{" "}
-        {failureReason(p.failureCode)}. O valor e a tarifa voltaram para o seu saldo.
+        O {saque} de {valor} não foi concluído{simulator ? "" : " pelo banco"}. Motivo: {failureReason(p.failureCode)}. O
+        valor e a tarifa voltaram para o seu saldo.
       </Alert>
     );
   }
   return (
     <Alert tone="ok">
-      {p.status !== "completed"
-        ? `Saque de ${brl(p.amountCents)} em processamento. Ele aparece como concluído assim que o banco confirmar.`
-        : simulator
-          ? `Saque simulado de ${brl(p.amountCents)} concluído para ${p.pixKey}. Nenhum dinheiro de verdade foi enviado.`
-          : `Saque de ${brl(p.amountCents)} enviado para ${p.pixKey}.`}
+      {p.status !== "completed" ? (
+        <>Saque de {valor} em processamento. Ele aparece como concluído assim que o banco confirmar.</>
+      ) : simulator ? (
+        <>
+          Saque simulado de {valor} concluído para {chave}. Nenhum dinheiro de verdade foi enviado.
+        </>
+      ) : (
+        <>
+          Saque de {valor} enviado para {chave}.
+        </>
+      )}
     </Alert>
   );
 }

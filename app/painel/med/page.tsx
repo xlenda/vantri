@@ -46,7 +46,9 @@ export default async function MedPage({ searchParams }: { searchParams: Promise<
           {list.data.map((c) => (
             <tr key={c.id} className={c.id === selected?.id ? "bg-brand/5" : undefined}>
               <td className="whitespace-nowrap text-muted">{dataHora(c.createdAt)}</td>
-              <td className="whitespace-nowrap font-semibold tabular-nums">{brl(c.amountCents)}</td>
+              <td className="whitespace-nowrap font-semibold tabular-nums">
+                <span className="valor-sensivel">{brl(c.amountCents)}</span>
+              </td>
               <td className="max-w-[16rem] truncate">{c.reason}</td>
               <td className="whitespace-nowrap">
                 <Deadline c={c} />
@@ -92,7 +94,9 @@ async function CaseView({ c, merchantId, sent }: { c: MedCaseRow; merchantId: st
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <p className="text-sm text-muted">Caso de MED</p>
-          <h2 className="text-2xl tabular-nums">{brl(c.amountCents)}</h2>
+          <h2 className="text-2xl tabular-nums">
+            <span className="valor-sensivel">{brl(c.amountCents)}</span>
+          </h2>
         </div>
         <StatusBadge kind="med" status={c.status} />
       </div>

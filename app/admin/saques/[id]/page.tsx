@@ -73,7 +73,8 @@ export default async function SaquePage({ params }: { params: Promise<{ id: stri
         {processing && age > STUCK_PAYOUT_MIN && <Badge tone="bad">preso há {ageText(age)}</Badge>}
       </div>
 
-      <div className="mt-6 grid gap-6 lg:grid-cols-2 lg:items-start">
+      {/* grid-cols-1 (minmax(0,1fr)): sem ele, no celular o <pre> do payload alargava a coluna além da tela. */}
+      <div className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-2 lg:items-start">
         <Card>
           <h2 className="text-lg">Saque</h2>
           <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-[10rem_1fr]">

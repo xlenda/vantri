@@ -9,6 +9,7 @@ const ITEMS = [
   ["/painel/cobrancas", "Cobranças"],
   ["/painel/transacoes", "Transações"],
   ["/painel/extrato", "Extrato"],
+  ["/painel/busca", "Buscar"],
   ["/painel/saques", "Saques"],
   ["/painel/integracoes", "Integrações"],
   ["/painel/med", "MED"],

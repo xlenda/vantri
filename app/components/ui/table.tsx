@@ -16,7 +16,8 @@ export function Table({
   caption?: string;
 }) {
   return (
-    <div className="overflow-x-auto rounded-2xl border border-line bg-white">
+    // relative: um .sr-only (position: absolute) numa célula escapava do recorte e alargava a página no celular.
+    <div className="relative overflow-x-auto rounded-2xl border border-line bg-white">
       <table className="w-full min-w-[36rem] text-left text-sm [&_td]:px-4 [&_td]:py-3 [&_td]:align-middle">
         {caption && <caption className="sr-only">{caption}</caption>}
         <thead className="border-b border-line bg-bg/60 text-xs font-semibold uppercase tracking-wide text-muted">

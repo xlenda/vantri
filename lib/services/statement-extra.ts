@@ -1,6 +1,6 @@
 import { and, asc, desc, eq, gte, inArray, lt, sql } from "drizzle-orm";
 import { z } from "zod";
-import { ApiError, LIMIT } from "@/lib/api/http";
+import { ApiError } from "@/lib/api/http";
 import { db } from "@/lib/db/client";
 import { ledgerEntries } from "@/lib/db/schema";
 import { parseOr } from "@/lib/validation";
@@ -17,7 +17,8 @@ const KIND = z.enum(ledgerEntries.kind.enumValues);
 const schema = z.strictObject({
   from: z.iso.date().optional(),
   to: z.iso.date().optional(),
-  limit: LIMIT,
+  // Sem rota pública: a tela pede 50 por página; a exportação pede o teto do arquivo + 1 numa leitura só.
+  limit: z.coerce.number().int().min(1).max(50_001).default(20),
   cursor: z.uuid().optional(),
   kind: z.array(KIND).nonempty().optional(),
   direction: z.enum(["in", "out"]).optional(),

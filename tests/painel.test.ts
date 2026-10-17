@@ -81,7 +81,7 @@ describe("entrada das ações (lista branca + zod estrito)", () => {
     [{ pixKeyType: "email", pixKey: "sem-arroba" }, "Chave Pix inválida para E-mail"],
     [{ pixKeyType: "aleatoria" }, "Escolha o tipo da chave Pix."],
     [{ amount: "0,99" }, "O valor mínimo do saque é R$ 1,00."],
-    [{ amount: "50.000,01" }, "O valor máximo por saque é R$ 50.000,00."],
+    [{ amount: "1.000.000,01" }, "O valor máximo por saque é R$ 1.000.000,00."],
     [{ idempotencyKey: "curta" }, "Formulário expirado"],
   ])("saque recusa %j", (o, msg) => expect(errOf(formInput(payoutInput, form({ ...PAYOUT, ...o })))).toContain(msg));
 

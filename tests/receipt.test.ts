@@ -1,5 +1,4 @@
 import { randomBytes, randomUUID } from "node:crypto";
-import { eq } from "drizzle-orm";
 import { beforeAll, beforeEach, expect, it } from "vitest";
 import { type Db, setDb } from "@/lib/db/client";
 import { payouts } from "@/lib/db/schema";

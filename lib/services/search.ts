@@ -33,6 +33,7 @@ export async function searchTransactions(
       and(
         eq(charges.merchantId, merchantId),
         or(
+          UUID.test(q) ? eq(charges.id, q) : undefined,
           eq(charges.txid, q),
           eq(charges.externalRef, q),
           eq(charges.endToEndId, q),

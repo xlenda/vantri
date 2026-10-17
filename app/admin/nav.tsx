@@ -38,6 +38,8 @@ const GROUPS: Group[] = [
     title: "Equipe",
     items: [
       { href: "/admin/equipe", label: "Equipe e papéis", perm: "equipe:gerir" },
+      // Suporte e operador operam usuários (2FA, senha, sessões) sem gerir a equipe: sem este item não achavam a tela.
+      { href: "/admin/equipe?aba=usuarios", label: "Usuários", perm: "usuarios:operar" },
       { href: "/admin/aprovacoes", label: "Aprovações", perm: "quatro_olhos:aprovar" },
       { href: "/admin/tarifas", label: "Tarifas", perm: "tarifas:gerir" },
       { href: "/admin/saude", label: "Saúde", perm: "saude:ler" },

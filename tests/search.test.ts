@@ -67,6 +67,15 @@ it("finds charge by exact E2E and by txid", async () => {
   expect(partial.charges).toEqual([]);
 });
 
+it("finds charge by its id (UUID), only for the owner", async () => {
+  const m = await newMerchant(d, 1);
+  const other = await newMerchant(d, 2);
+  const c = await charge(m);
+  expect((await searchTransactions(m, c.id)).charges.map((x) => x.id)).toEqual([c.id]);
+  expect((await searchTransactions(m, c.id.toUpperCase())).charges.map((x) => x.id)).toEqual([c.id]);
+  expect((await searchTransactions(other, c.id)).charges).toEqual([]);
+});
+
 it("finds charge by payer_name prefix", async () => {
   const m = await newMerchant(d, 1);
   const maria = await charge(m, { payerName: "Maria Silva" });

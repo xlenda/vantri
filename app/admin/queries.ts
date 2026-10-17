@@ -6,6 +6,7 @@ import { charges, cronRuns, ledgerEntries, medCases, merchants, payouts, users, 
 import { chargeAsOf, chargeStatusWhere } from "@/lib/services/charges";
 import type { PayoutRow } from "@/lib/services/payouts";
 import { DAY_MS, dayStart, todayDate, todayStart } from "./format";
+import { STALE_AFTER_SEC } from "./saude/cron-health";
 
 // Leituras do admin (todos os lojistas). Quem chama já passou por requireUser({ role: "admin" }).
 
@@ -363,7 +364,9 @@ export async function aggregateBalances(): Promise<{ availableTotal: number; blo
 
 export const STUCK_PAYOUT_MIN = 10; // o "presos" de /admin/saques
 export const MED_DUE_SOON_H = 48; // o "MED com prazo curto" do Início do painel
-export const CRON_STALE_MIN = 5; // o "parado" da Saúde
+// O "parado" da Saúde (cronHealth): a mesma constante, para o card e a tela nunca discordarem. Com o tick só diário
+// (vercel.json), o card lê "Parada" até o pg_cron de 1 em 1 minuto estar ligado (infra, Ruling 38) — e está certo.
+export const CRON_STALE_MIN = STALE_AFTER_SEC / 60;
 
 /** O que pede ação agora (não depende do período). Cada número leva à tela que resolve. */
 export async function pendingQueue(now = Date.now()): Promise<{

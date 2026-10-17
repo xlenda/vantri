@@ -42,30 +42,22 @@ export async function exportSheet(merchantId: string, e: Extrato, max = MAX_ROWS
       rows: days.map((d) => [diaBr(d.day), d.openingCents, d.inflowCents, d.outflowCents, d.feeCents, d.medCents, d.closingCents]),
     };
   }
-  const rows: Cell[][] = [];
-  let cursor: string | undefined;
-  // ponytail: arquivo inteiro em memória (até MAX_ROWS; streaming se precisar de mais), e cada página do serviço relê
-  // o histórico do lojista (ver o ponytail de statement-extra): N linhas custam N/100 leituras do histórico. Ok no
-  // lançamento; quando o serviço der a janela inteira numa consulta, trocar o laço por ela.
-  do {
-    const { from, to, kind, direction, minCents, maxCents } = e;
-    const page = await listStatementWithBalance(merchantId, { from, to, kind, direction, minCents, maxCents, cursor, limit: 100 });
-    for (const r of page.data) {
-      rows.push([
-        stamp.format(r.createdAt),
-        LEDGER_KIND[r.kind],
-        LEDGER_BUCKET[r.bucket],
-        LEDGER_REF[r.refType],
-        r.refId,
-        r.amountCents > 0 ? r.amountCents : "",
-        r.amountCents < 0 ? -r.amountCents : "",
-        r.balanceAfter ?? "", // com filtro de tipo/movimento o saldo corrido não existe: célula vazia, nunca um número errado
-        r.id,
-      ]);
-    }
-    if (rows.length > max) return null;
-    cursor = page.nextCursor ?? undefined;
-  } while (cursor);
+  // Uma leitura só (o serviço relê o histórico do lojista a cada chamada): max + 1 linhas dizem se passou do teto.
+  // ponytail: arquivo inteiro em memória (até MAX_ROWS); streaming se precisar de mais.
+  const { from, to, kind, direction, minCents, maxCents } = e;
+  const { data } = await listStatementWithBalance(merchantId, { from, to, kind, direction, minCents, maxCents, limit: max + 1 });
+  if (data.length > max) return null;
+  const rows: Cell[][] = data.map((r) => [
+    stamp.format(r.createdAt),
+    LEDGER_KIND[r.kind],
+    LEDGER_BUCKET[r.bucket],
+    LEDGER_REF[r.refType],
+    r.refId,
+    r.amountCents > 0 ? r.amountCents : "",
+    r.amountCents < 0 ? -r.amountCents : "",
+    r.balanceAfter ?? "", // com filtro de tipo/movimento o saldo corrido não existe: célula vazia, nunca um número errado
+    r.id,
+  ]);
   return { name: `extrato-vantri-${period}`, title: "Extrato", header: STATEMENT, rows };
 }
 

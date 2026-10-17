@@ -5,6 +5,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createBatchPayoutAction, createPayoutAction, previewPayoutAction, resumeBatchAction } from "@/app/painel/saques/actions";
 import NovoSaquePage from "@/app/painel/saques/novo/page";
+import SaquesPage from "@/app/painel/saques/page";
 import { brl } from "@/lib/br/money";
 import { encrypt } from "@/lib/crypto";
 import { type Db, setDb } from "@/lib/db/client";
@@ -168,6 +169,16 @@ describe("passo Revisão (previewPayoutAction)", () => {
     expect(await available()).toBe(100_000 - 40_300); // um número só: o total da prévia é o que saiu do saldo
   });
 
+  it("acima de R$ 50.000 o assistente aceita (o lote vai até R$ 1.000.000) e divide no teto por transferência", async () => {
+    const r = await previewPayoutAction(undefined, form({ ...SAQUE, amount: "60.000,00" }));
+    const p = r && "preview" in r ? r.preview : null;
+    expect(p?.amountCents).toBe(6_000_000);
+    expect(p?.parcels).toHaveLength(400); // 400 × R$ 150,00 (o teto deste teste)
+    expect(await previewPayoutAction(undefined, form({ ...SAQUE, amount: "1.000.000,01" }))).toMatchObject({
+      error: "O valor máximo por saque é R$ 1.000.000,00.",
+    });
+  });
+
   it("chave inválida volta com o erro; valor + tarifas acima do saldo aparece como saldo depois negativo", async () => {
     expect(await previewPayoutAction(undefined, form({ ...SAQUE, pixKeyType: "cpf", pixKey: "529.982.247-24" }))).toMatchObject({
       error: "Chave Pix inválida para CPF. Confira e tente de novo.",
@@ -310,6 +321,16 @@ describe("retomar lote (resumeBatchAction) e a tela do lote", () => {
     expect(html).toContain(STUCK);
     expect(html).not.toContain("Retomar parcelas pendentes");
     expect(await available()).toBe(100_000); // a parcela que falhou estornou valor e tarifa
+  });
+
+  it("a lista de saques linka de volta o lote que não terminou (só os deste lojista)", async () => {
+    const to = await redirectOf(createBatchPayoutAction(undefined, form({ ...LOTE, pixKey: "falha@teste.com", code: await codeAt(0) })));
+    const outro = await activeMerchant(2);
+    const { batchId: alheio } = await createBatchPayout(outro, { amount: 40_000, pix_key: "falha@teste.com", pix_key_type: "email" }, "lote-outro");
+    const html = renderToStaticMarkup(await SaquesPage({ searchParams: Promise.resolve({}) }));
+    expect(html).toContain(`href="/painel/saques/novo?lote=${batchIdOf(to)}"`);
+    expect(html).toContain("parou numa parcela");
+    expect(html).not.toContain(alheio);
   });
 
   it("lote de outro lojista: retomar não acha (sem gastar o código) e a URL dá 404", async () => {

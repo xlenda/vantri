@@ -271,10 +271,14 @@ it("saque concluído: no simulador o aviso diz que foi simulado", async () => {
   const [p] = await d.select().from(payouts);
   const page = async () => renderToStaticMarkup(await SaquesPage({ searchParams: Promise.resolve({ feito: p.id }) }));
 
-  expect(await page()).toContain(`Saque simulado de ${brl(15_000)} concluído para fornecedor@exemplo.com. Nenhum dinheiro de verdade foi enviado.`);
+  // Valor com valor-sensivel (some com "ocultar saldos") e chave do favorecido mascarada, como na lista.
+  const valor = `<span class="valor-sensivel">${brl(15_000)}</span>`;
+  const simulado = await page();
+  expect(simulado).toContain(`Saque simulado de ${valor} concluído para f•••@exemplo.com. Nenhum dinheiro de verdade foi enviado.`);
+  expect(simulado).not.toContain("fornecedor@exemplo.com");
   vi.stubEnv("PIX_PROVIDER", "parceiro");
   const real = await page();
-  expect(real).toContain(`Saque de ${brl(15_000)} enviado para fornecedor@exemplo.com.`);
+  expect(real).toContain(`Saque de ${valor} enviado para f•••@exemplo.com.`);
   expect(real).not.toContain("simulado");
 });
 

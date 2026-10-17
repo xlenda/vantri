@@ -55,9 +55,11 @@ const KEY_TYPES = PIX_KEY_TYPES.map(([t]) => t) as [(typeof PIX_KEY_TYPES)[numbe
 export const payoutInput = z
   .strictObject({
     idempotencyKey: z.string().regex(/^[A-Za-z0-9]{24}$/, "Formulário expirado. Recarregue a página e tente de novo."),
+    // Até o teto do saque em lote (createBatchPayout): acima do teto por transferência, o avulso recusa antes do
+    // código 2FA e o assistente divide em parcelas (cada uma ≤ teto, validada de novo pelo createPayout).
     amount: money("Valor inválido. Digite em reais, por exemplo 150,00 ou 1.234,56.")
       .refine((c) => c >= 100, "O valor mínimo do saque é R$ 1,00.")
-      .refine((c) => c <= 5_000_000, "O valor máximo por saque é R$ 50.000,00."),
+      .refine((c) => c <= 100_000_000, "O valor máximo por saque é R$ 1.000.000,00."),
     pixKeyType: z.enum(KEY_TYPES, "Escolha o tipo da chave Pix."),
     pixKey: z.string().trim().min(1, "Informe a chave Pix de destino.").max(100, "A chave Pix pode ter até 100 caracteres."),
     description: freeText(140, "A descrição"),
