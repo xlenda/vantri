@@ -635,7 +635,8 @@ describe("ações de clientes", () => {
   });
 
   it("taxas em % e R$ viram bps e centavos", async () => {
-    const id = await merchant();
+    // Nunca ativado: muda na hora. Cliente ativo vira pedido de quatro olhos (tests/admin-approvals.test.ts).
+    const id = await merchant("pending");
     const s = await updateFeesAction(
       undefined,
       form({ merchantId: id, feeInPercent: "1,99", feeInFixed: "0,50", feeOutPercent: "0", feeOutFixed: "2,00" }),
@@ -729,14 +730,16 @@ describe("ações de clientes", () => {
       email: "m@x.com",
       password: "senha-bem-longa-123",
     });
-    expect(await merchantStatusAction(undefined, form({ merchantId, op: "reactivate" }))).toEqual({
+    expect(await merchantStatusAction(undefined, form({ merchantId, op: "suspend" }))).toEqual({
       error: "Ação não permitida no status atual do cliente.",
     });
     expect(await merchantStatusAction(undefined, form({ merchantId, op: "approve" }))).toEqual({ ok: "Cliente aprovado." });
     expect(await merchantStatusAction(undefined, form({ merchantId, op: "suspend" }))).toEqual({ ok: "Cliente suspenso." });
+    // Reativar é quatro olhos (motivo + código 2FA → pedido): nunca direto. Fluxo em tests/admin-approvals.test.ts.
     expect(await merchantStatusAction(undefined, form({ merchantId, op: "reactivate" }))).toEqual({
-      ok: "Cliente reativado.",
+      error: "Escreva o motivo (de 3 a 500 caracteres).",
     });
+    expect((await d.select().from(merchants).where(eq(merchants.id, merchantId)))[0].status).toBe("suspended");
     expect(await merchantStatusAction(undefined, form({ merchantId, op: "delete" }))).toEqual({
       error: "Pedido inválido.",
     });

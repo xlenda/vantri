@@ -6,11 +6,13 @@ import type { ReactNode } from "react";
 import { z } from "zod";
 import { ActionForm } from "@/app/components/ui/action-form";
 import { Card } from "@/app/components/ui/card";
-import { Input } from "@/app/components/ui/field";
+import { Input, Select } from "@/app/components/ui/field";
 import { Badge, StatusBadge } from "@/app/components/ui/status-badge";
 import { SubmitButton } from "@/app/components/ui/submit-button";
 import { Table } from "@/app/components/ui/table";
-import { requireUser } from "@/lib/auth/guards";
+import { feeText } from "@/app/painel/lib";
+import { requireAdmin } from "@/lib/auth/guards";
+import { type Perm, pode } from "@/lib/auth/perms";
 import { formatCnpj, maskDocument, SEGMENT_LABELS, type Segment } from "@/lib/br/documents";
 import { brl, dateTime } from "@/lib/br/money";
 import { decrypt } from "@/lib/crypto";
@@ -18,9 +20,11 @@ import { db } from "@/lib/db/client";
 import { merchants, users } from "@/lib/db/schema";
 import { logError } from "@/lib/log";
 import { getBalance } from "@/lib/money/ledger";
+import { feeChangeNeedsApproval } from "@/lib/services/admin/approvals";
+import { CodeInput } from "../../equipe/forms";
 import { percent, reais } from "../../format";
 import { listChargesAdmin, listPayoutsAdmin } from "../../queries";
-import { merchantStatusAction, updateFeesAction } from "../actions";
+import { merchantStatusAction, requestBalanceAdjustmentAction, updateFeesAction } from "../actions";
 import { OpButton } from "../op-button";
 
 export const metadata: Metadata = { title: "Cliente — Admin Vantri" };
@@ -28,7 +32,9 @@ export const metadata: Metadata = { title: "Cliente — Admin Vantri" };
 const RECENT = 10;
 
 export default async function ClientePage({ params }: { params: Promise<{ id: string }> }) {
-  await requireUser({ role: "admin" });
+  const { user } = await requireAdmin({ perm: "clientes:ler" });
+  // Só mostra o que o papel pode fazer; a action re-checa a mesma permissão no servidor.
+  const can = (perm: Perm) => pode(user.adminRole, perm);
   const { id } = await params;
   if (!z.uuid().safeParse(id).success) notFound();
   const [m] = await db().select().from(merchants).where(eq(merchants.id, id));
@@ -42,6 +48,7 @@ export default async function ClientePage({ params }: { params: Promise<{ id: st
   ]);
 
   const manualReview = m.needsManualReview && m.status === "pending";
+  const feesNeedApproval = feeChangeNeedsApproval(m);
   // CNPJ completo só em revisão manual (pendente): o admin precisa dele para conferir na Receita. Fora disso, mascarado.
   const fullCnpj = manualReview && m.documentType === "cnpj";
   let document: string;
@@ -85,7 +92,11 @@ export default async function ClientePage({ params }: { params: Promise<{ id: st
 
         <Card>
           <h2 className="text-lg">Status</h2>
-          <StatusActions id={m.id} status={m.status} manualReview={manualReview} />
+          {can("clientes:cadastro") ? (
+            <StatusActions id={m.id} status={m.status} manualReview={manualReview} />
+          ) : (
+            <p className="mt-3 text-sm text-muted">Seu papel só consulta o status do cliente.</p>
+          )}
         </Card>
 
         <Card>
@@ -104,35 +115,56 @@ export default async function ClientePage({ params }: { params: Promise<{ id: st
               </div>
             ))}
           </dl>
+          {can("dinheiro:mover") && <AdjustBalance merchantId={m.id} />}
         </Card>
 
         <Card>
           <h2 className="text-lg">Taxas</h2>
-          <ActionForm action={updateFeesAction} className="mt-4 grid gap-4 sm:grid-cols-2">
-            <input type="hidden" name="merchantId" value={m.id} />
-            <FeePair
-              legend="Pix recebido (por cobrança paga)"
-              pct={["feeInPercent", percent(m.feeInBps)]}
-              fixed={["feeInFixed", reais(m.feeInFixedCents)]}
-            />
-            <FeePair
-              legend="Pix enviado (por saque)"
-              pct={["feeOutPercent", percent(m.feeOutBps)]}
-              fixed={["feeOutFixed", reais(m.feeOutFixedCents)]}
-            />
-            <p className="text-xs text-muted sm:col-span-2">
-              Percentual de 0 a 100 com até 2 casas; fixo de R$ 0,00 a R$ 1.000,00. Vale para as próximas transações.
-            </p>
-            {m.approvedAt && (
-              <p className="rounded-xl bg-accent/40 px-3 py-2 text-xs font-semibold text-ink sm:col-span-2">
-                Os termos prometem aviso com 30 dias de antecedência antes de mudar a tarifa de um cliente ativo: avise o
-                cliente antes de salvar.
+          {can("taxas:editar") ? (
+            <ActionForm action={updateFeesAction} className="mt-4 grid gap-4 sm:grid-cols-2">
+              <input type="hidden" name="merchantId" value={m.id} />
+              <FeePair
+                legend="Pix recebido (por cobrança paga)"
+                pct={["feeInPercent", percent(m.feeInBps)]}
+                fixed={["feeInFixed", reais(m.feeInFixedCents)]}
+              />
+              <FeePair
+                legend="Pix enviado (por saque)"
+                pct={["feeOutPercent", percent(m.feeOutBps)]}
+                fixed={["feeOutFixed", reais(m.feeOutFixedCents)]}
+              />
+              <p className="text-xs text-muted sm:col-span-2">
+                Percentual de 0 a 100 com até 2 casas; fixo de R$ 0,00 a R$ 1.000,00. Vale para as próximas transações.
               </p>
-            )}
-            <div className="sm:col-span-2">
-              <SubmitButton pendingText="Salvando…">Salvar taxas</SubmitButton>
-            </div>
-          </ActionForm>
+              {feesNeedApproval && (
+                <>
+                  <p className="rounded-xl bg-accent/40 px-3 py-2 text-xs font-semibold text-ink sm:col-span-2">
+                    Os termos prometem aviso com 30 dias de antecedência antes de mudar a tarifa de um cliente ativo:
+                    avise o cliente antes de pedir. A mudança vira pedido de quatro olhos e só vale quando outro
+                    administrador aprovar em Aprovações.
+                  </p>
+                  <div className="sm:col-span-2">
+                    <Input label="Motivo" name="reason" id="taxa-motivo" required minLength={3} maxLength={500} />
+                  </div>
+                  <div className="sm:col-span-2">
+                    <CodeInput id="taxa-codigo" />
+                  </div>
+                </>
+              )}
+              <div className="sm:col-span-2">
+                {feesNeedApproval ? (
+                  <SubmitButton pendingText="Enviando…">Pedir mudança de taxa</SubmitButton>
+                ) : (
+                  <SubmitButton pendingText="Salvando…">Salvar taxas</SubmitButton>
+                )}
+              </div>
+            </ActionForm>
+          ) : (
+            <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-[10rem_1fr]">
+              <Row label="Pix recebido">{feeText(m.feeInBps, m.feeInFixedCents)}</Row>
+              <Row label="Pix enviado">{feeText(m.feeOutBps, m.feeOutFixedCents)}</Row>
+            </dl>
+          )}
         </Card>
       </div>
 
@@ -249,7 +281,54 @@ function StatusActions({
           </OpButton>
         </>
       )}
-      {status === "suspended" && <OpButton op="reactivate">Reativar</OpButton>}
+      {status === "suspended" && (
+        <>
+          <p className="text-sm text-muted">
+            Reativar é quatro olhos: vira pedido e o cliente só volta a ativo quando outro administrador aprovar em
+            Aprovações.
+          </p>
+          <Input label="Motivo da reativação" name="reason" id="status-motivo" required minLength={3} maxLength={500} />
+          <CodeInput id="status-codigo" />
+          <OpButton op="reactivate">Pedir reativação</OpButton>
+        </>
+      )}
     </ActionForm>
+  );
+}
+
+/** "Ajustar saldo": crédito ou débito no disponível, como pedido de quatro olhos (nada muda até outro admin aprovar). */
+function AdjustBalance({ merchantId }: { merchantId: string }) {
+  return (
+    <details className="group mt-6 border-t border-line pt-4">
+      <summary className="flex cursor-pointer list-none items-center justify-between gap-3 font-semibold [&::-webkit-details-marker]:hidden">
+        Ajustar saldo
+        <span aria-hidden className="text-xl leading-none text-muted transition-transform group-open:rotate-45">
+          +
+        </span>
+      </summary>
+      <ActionForm action={requestBalanceAdjustmentAction} className="mt-4 space-y-4">
+        <input type="hidden" name="merchantId" value={merchantId} />
+        <p className="text-xs leading-relaxed text-muted">
+          Vira um pedido: o saldo só muda quando outro administrador aprovar em Aprovações. Débito que deixaria o
+          disponível negativo é recusado na aprovação. Nada é apagado: o ajuste é um lançamento novo no extrato.
+        </p>
+        <Select label="Tipo" name="direction" id="ajuste-tipo">
+          <option value="credito">Crédito (soma ao disponível)</option>
+          <option value="debito">Débito (tira do disponível)</option>
+        </Select>
+        <Input label="Valor (R$)" name="amount" id="ajuste-valor" inputMode="decimal" required maxLength={16} />
+        <Input
+          label="Motivo"
+          name="reason"
+          id="ajuste-motivo"
+          required
+          minLength={3}
+          maxLength={500}
+          hint="Fica no pedido e na auditoria. Não escreva dados pessoais (documento, chave Pix)."
+        />
+        <CodeInput id="ajuste-codigo" />
+        <SubmitButton pendingText="Enviando…">Pedir ajuste</SubmitButton>
+      </ActionForm>
+    </details>
   );
 }

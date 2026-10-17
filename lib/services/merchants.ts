@@ -52,11 +52,14 @@ const adminCreateSchema = z.strictObject(merchantFields);
 
 const bps = z.int().min(0).max(10_000);
 const cents = z.int().min(0).max(100_000);
-const feesSchema = z.strictObject({ feeInBps: bps, feeInFixedCents: cents, feeOutBps: bps, feeOutFixedCents: cents });
+export const feesSchema = z.strictObject({ feeInBps: bps, feeInFixedCents: cents, feeOutBps: bps, feeOutFixedCents: cents });
 export type Fees = z.infer<typeof feesSchema>;
 
 const parse = <T extends z.ZodType>(schema: T, input: unknown) =>
   parseOr(schema, input, (msg) => new MerchantError("invalid_request", msg));
+
+/** Na transação de quem chama (ex.: a aprovação de quatro olhos, que aplica o efeito na dela) ou numa própria. */
+const inTx = <T>(tx: Tx | undefined, fn: (tx: Tx) => Promise<T>): Promise<T> => (tx ? fn(tx) : db().transaction(fn));
 
 type MerchantInput = z.output<typeof adminCreateSchema>;
 
@@ -243,8 +246,8 @@ export async function approveMerchant(
   });
 }
 
-const transition = (from: Status, to: Status, action: string) => (id: string, actorId: string) =>
-  db().transaction(async (tx) => {
+const transition = (from: Status, to: Status, action: string) => (id: string, actorId: string, opts: { tx?: Tx } = {}) =>
+  inTx(opts.tx, async (tx) => {
     await lockInStatus(tx, id, from);
     await tx.update(merchants).set({ status: to }).where(eq(merchants.id, id));
     await writeAudit(tx, actorId, action, { merchantId: id });
@@ -258,10 +261,15 @@ export const reactivateMerchant = transition("suspended", "active", "merchant.re
  * bps 0–10000, centavos 0–100000, inteiros. Cada mudança vira uma linha de vigência em fee_history (na mesma
  * transação); `planId` quando as taxas vieram de um plano (assignPlanToMerchant), senão é taxa personalizada.
  */
-export async function updateFees(id: string, fees: Fees, actorId: string, opts: { planId?: string } = {}): Promise<void> {
+export async function updateFees(
+  id: string,
+  fees: Fees,
+  actorId: string,
+  opts: { planId?: string; tx?: Tx } = {},
+): Promise<void> {
   const f = parse(feesSchema, fees);
   if (!z.uuid().safeParse(id).success) throw notFound();
-  await db().transaction(async (tx) => {
+  await inTx(opts.tx, async (tx) => {
     const [m] = await tx.update(merchants).set(f).where(eq(merchants.id, id)).returning({ id: merchants.id });
     if (!m) throw notFound();
     await writeAudit(tx, actorId, "merchant.update_fees", { merchantId: id, ...f, ...(opts.planId && { planId: opts.planId }) });
