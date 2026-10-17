@@ -14,7 +14,11 @@ const eslintConfig = [
   {
     ignores: [
       "node_modules/**",
-      ".next/**",
+      // .next e as pastas de build paralelas (NEXT_DIST_DIR=.next-*), como no .gitignore.
+      ".next*/**",
+      // Worktrees de outros agentes (cópias do repositório) e o banco local de desenvolvimento.
+      ".claude/**",
+      ".data/**",
       "out/**",
       "build/**",
       "next-env.d.ts",
