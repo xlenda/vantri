@@ -2,11 +2,13 @@
 
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
+import { after } from "next/server";
 import { formText, GENERIC_ERROR } from "@/app/conta/acesso";
 import { randomBase62 } from "@/lib/crypto";
 import { logError } from "@/lib/log";
 import { simulator } from "@/lib/provider/simulator";
 import { applyChargePaid, ChargeError, createCharge, getCharge } from "@/lib/services/charges";
+import { dispatchDue } from "@/lib/webhooks/dispatch";
 import { chargeInput, firstIssue, formInput, idInput } from "../input";
 import { painelSession } from "../lib";
 
@@ -57,6 +59,7 @@ export async function simulatePaymentAction(fd: FormData): Promise<void> {
       ok = false;
     }
     if (!ok) redirect(`/painel/cobrancas?id=${c.id}&erro=simulacao`);
+    after(() => dispatchDue()); // charge.paid sai agora, não no próximo tick do cron
     revalidatePath("/painel", "layout");
   }
   redirect(`/painel/cobrancas?id=${c.id}`);

@@ -2,12 +2,14 @@ import { randomBytes } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { generate } from "otplib";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { createKeyAction } from "@/app/painel/integracoes/actions";
+import { simulatePaymentAction } from "@/app/painel/cobrancas/actions";
+import { createKeyAction, resendDeliveryAction } from "@/app/painel/integracoes/actions";
 import { createPayoutAction } from "@/app/painel/saques/actions";
 import { encrypt } from "@/lib/crypto";
 import { type Db, setDb } from "@/lib/db/client";
-import { apiKeys, merchants, payouts, users } from "@/lib/db/schema";
+import { apiKeys, charges, merchants, payouts, users, webhookDeliveries, webhookEndpoints } from "@/lib/db/schema";
 import { getBalance, postEntries } from "@/lib/money/ledger";
+import { createCharge } from "@/lib/services/charges";
 import { createTestDb } from "./helpers/db";
 import { newMerchant } from "./helpers/factories";
 
@@ -29,6 +31,12 @@ vi.mock("next/navigation", () => ({
   },
 }));
 vi.mock("next/cache", () => ({ revalidatePath: vi.fn() }));
+// `after` real só existe dentro de uma requisição do Next; aqui guarda a tarefa para o teste conferir.
+const afterTasks = vi.hoisted(() => [] as Array<() => unknown>);
+vi.mock("next/server", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("next/server")>()),
+  after: (task: () => unknown) => void afterTasks.push(task),
+}));
 
 const TOTP_SECRET = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP";
 // Relógio fixo no meio de um passo de 30 s: códigos determinísticos (só o Date é falso).
@@ -44,6 +52,7 @@ beforeAll(() => {
 });
 
 beforeEach(async () => {
+  afterTasks.length = 0;
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(NOW * 1000);
   vi.stubEnv("PIX_PROVIDER", "simulator");
@@ -158,6 +167,7 @@ describe("saque pelo painel (createPayoutAction)", () => {
     });
     expect(await all()).toHaveLength(0);
     expect((await getBalance(merchantId)).available).toBe(100_000);
+    expect(afterTasks).toHaveLength(0);
   });
 
   it("chave Pix inválida é recusada antes do 2FA e não gasta o código", async () => {
@@ -178,6 +188,9 @@ describe("saque pelo painel (createPayoutAction)", () => {
       /^NEXT_REDIRECT \/painel\/saques\?feito=[0-9a-f-]{36}$/,
     );
     const [p] = await all();
+    // payout.completed do simulador já está na fila: o envio dos webhooks fica agendado para depois da resposta.
+    expect(afterTasks).toHaveLength(1);
+    expect(await afterTasks[0]()).toEqual({ delivered: 0, failed: 0 }); // é o dispatchDue (sem endpoint: nada a enviar)
     // Reenvio do mesmo formulário (código seguinte): volta o mesmo saque, com o aviso de repetido.
     await expect(createPayoutAction(undefined, form({ ...PAYOUT, code: await codeAt(1) }))).rejects.toThrow(
       `NEXT_REDIRECT /painel/saques?feito=${p.id}&repetido=1`,
@@ -201,5 +214,37 @@ describe("saque pelo painel (createPayoutAction)", () => {
     auth.session = null;
     await expect(createPayoutAction(undefined, form({ ...PAYOUT, code: await codeAt(0) }))).rejects.toThrow("NEXT_REDIRECT /entrar");
     expect(await all()).toHaveLength(0);
+  });
+});
+
+describe("eventos fora do webhook do provedor: envio agendado na hora (after)", () => {
+  it("simular pagamento", async () => {
+    const { charge } = await createCharge(merchantId, { external_ref: "p1", amount: 14990 });
+    const go = () => simulatePaymentAction(form({ id: charge.id }));
+    await expect(go()).rejects.toThrow(`NEXT_REDIRECT /painel/cobrancas?id=${charge.id}`);
+    expect((await d.select().from(charges))[0].status).toBe("paid");
+    expect(afterTasks).toHaveLength(1);
+    expect(await afterTasks[0]()).toEqual({ delivered: 0, failed: 0 });
+    // Já paga: nada novo a enviar.
+    await expect(go()).rejects.toThrow("NEXT_REDIRECT");
+    expect(afterTasks).toHaveLength(1);
+  });
+
+  it("reenviar entrega", async () => {
+    const [w] = await d
+      .insert(webhookEndpoints)
+      .values({ merchantId, url: "https://loja.example.com/h", secretEnc: "x", events: ["charge.paid"] })
+      .returning();
+    const [dl] = await d
+      .insert(webhookDeliveries)
+      .values({ endpointId: w.id, eventId: "evt_1", eventType: "charge.paid", payload: {}, status: "failed", attempts: 7 })
+      .returning();
+    await expect(resendDeliveryAction(form({ id: "6c0b1d3e-9f1a-4f7e-8a9b-1c2d3e4f5a6b" }))).rejects.toThrow(
+      "NEXT_REDIRECT /painel/integracoes?erro=reenviar",
+    );
+    expect(afterTasks).toHaveLength(0);
+    await expect(resendDeliveryAction(form({ id: dl.id }))).rejects.toThrow("NEXT_REDIRECT /painel/integracoes?ok=reenviada");
+    expect((await d.select().from(webhookDeliveries))[0].status).toBe("pending");
+    expect(afterTasks).toHaveLength(1);
   });
 });

@@ -2,10 +2,12 @@
 
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
+import { after } from "next/server";
 import { formText, GENERIC_ERROR } from "@/app/conta/acesso";
 import { ApiKeyError, createApiKey, revokeApiKey } from "@/lib/api/keys";
 import { logError } from "@/lib/log";
 import { createEndpoint, resendDelivery, WebhookError } from "@/lib/services/events";
+import { dispatchDue } from "@/lib/webhooks/dispatch";
 import { firstIssue, formInput, idInput, keyInput, webhookInput } from "../input";
 import { freshTotpProblem, painelSession } from "../lib";
 
@@ -97,6 +99,7 @@ export async function resendDeliveryAction(fd: FormData): Promise<void> {
       ok = false;
     }
   }
+  if (ok) after(() => dispatchDue()); // a entrega sai agora, não no próximo tick do cron
   revalidatePath(PAGE);
   redirect(ok ? `${PAGE}?ok=reenviada` : `${PAGE}?erro=reenviar`);
 }

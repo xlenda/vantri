@@ -21,6 +21,13 @@ import { simulator } from "@/lib/provider/simulator";
 import { createTestDb } from "./helpers/db";
 import { newMerchant } from "./helpers/factories";
 
+// `after` real só existe dentro de uma requisição do Next; aqui guarda a tarefa para o teste conferir.
+const afterTasks = vi.hoisted(() => [] as Array<() => unknown>);
+vi.mock("next/server", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("next/server")>()),
+  after: (task: () => unknown) => void afterTasks.push(task),
+}));
+
 let d: Db;
 
 beforeAll(() => {
@@ -28,6 +35,7 @@ beforeAll(() => {
 });
 
 beforeEach(async () => {
+  afterTasks.length = 0;
   d = await createTestDb();
   setDb(d);
 });
@@ -298,10 +306,14 @@ it("POST /payouts without Idempotency-Key → 422", async () => {
     expect(r.json.error.code).toBe("invalid_request");
   }
   expect(await d.$count(payouts)).toBe(0);
+  expect(afterTasks).toHaveLength(0);
 
   const headers = { "idempotency-key": "pedido-saque-0001" };
   const first = await call(payoutsPOST, { key, body: PAYOUT, headers });
   expect(first.status).toBe(201);
+  // payout.completed do simulador já está na fila: o envio dos webhooks fica agendado para depois da resposta.
+  expect(afterTasks).toHaveLength(1);
+  expect(await afterTasks[0]()).toEqual({ delivered: 0, failed: 0 }); // é o dispatchDue (sem endpoint: nada a enviar)
   expect(Object.keys(first.json)).toEqual(PAYOUT_KEYS);
   const again = await call(payoutsPOST, { key, body: PAYOUT, headers });
   expect(again.status).toBe(200);

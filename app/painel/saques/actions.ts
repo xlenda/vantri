@@ -2,9 +2,11 @@
 
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
+import { after } from "next/server";
 import { formText, GENERIC_ERROR } from "@/app/conta/acesso";
 import { logError } from "@/lib/log";
 import { createPayout, PayoutError } from "@/lib/services/payouts";
+import { dispatchDue } from "@/lib/webhooks/dispatch";
 import { firstIssue, formInput, payoutInput } from "../input";
 import { freshTotpProblem, painelSession } from "../lib";
 
@@ -51,6 +53,7 @@ export async function createPayoutAction(prev: PayoutFormState, fd: FormData): P
     logError("painel: saque falhou", e, { merchant: merchant.id });
     return fail(GENERIC_ERROR);
   }
+  after(() => dispatchDue()); // payout.completed/failed já na fila sai agora, não no próximo tick do cron
   revalidatePath("/painel", "layout");
   // Mesma chave de idempotência e mesmo conteúdo: o serviço devolve o saque que já existia (replayed).
   redirect(`/painel/saques?feito=${payoutId}${replayed ? "&repetido=1" : ""}`);
