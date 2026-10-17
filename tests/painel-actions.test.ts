@@ -121,7 +121,7 @@ describe("criar chave de API (createKeyAction)", () => {
   it("formato inválido (IP) é recusado antes do 2FA e não gasta o código", async () => {
     const code = await codeAt(0);
     expect(await createKeyAction(undefined, form({ ...KEY, ips: "1.2.3.999", code }))).toMatchObject({
-      error: "Lista de IPs inválida: use até 20 endereços IPv4 ou IPv6.",
+      error: "Lista de IPs inválida: até 20 endereços ou faixas CIDR (IPv4 a partir de /24, IPv6 de /64).",
     });
     expect(await lastStep()).toBeNull();
     expect(await keys()).toHaveLength(0);
