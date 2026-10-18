@@ -1,4 +1,4 @@
-// Cria um admin com senha temporária: `npm run seed:admin -- email@exemplo.com`.
+// Cria um admin com senha temporária: `npm run seed:admin -- email@exemplo.com` (SEED_ADMIN_PASSWORD fixa a senha; senão é aleatória).
 // Usa DATABASE_URL (produção) ou, sem ela, o PGlite local em .data/pglite (pare o `next dev` antes: um processo por vez).
 import { pathToFileURL } from "node:url";
 import { eq } from "drizzle-orm";
@@ -14,13 +14,14 @@ const emailSchema = z.string().trim().toLowerCase().max(254).pipe(z.email());
 /** Minúsculo e sem espaços (o banco tem CHECK email = lower(email)); inválido → null. */
 export const parseAdminEmail = (raw: string): string | null => emailSchema.safeParse(raw).data ?? null;
 
-export async function seedAdmin(rawEmail: string): Promise<{ email: string; tempPassword: string }> {
+export async function seedAdmin(rawEmail: string, password?: string): Promise<{ email: string; tempPassword: string }> {
   const email = parseAdminEmail(rawEmail);
   if (!email) throw new Error("E-mail inválido.");
+  if (password !== undefined && password.length < 12) throw new Error("Senha informada curta demais: mínimo de 12 caracteres.");
   // O UNIQUE de users.email também barra corrida; aqui é só para a mensagem clara.
   const [exists] = await db().select({ id: users.id }).from(users).where(eq(users.email, email));
   if (exists) throw new Error(`Já existe um usuário com o e-mail ${email}. Nada foi alterado.`);
-  const tempPassword = randomBase62(16);
+  const tempPassword = password ?? randomBase62(16);
   await db()
     .insert(users)
     .values({ email, passwordHash: await hashPassword(tempPassword), role: "admin", adminRole: "admin", mustChangePassword: true });
@@ -35,7 +36,7 @@ async function main() {
     return;
   }
   try {
-    const r = await seedAdmin(process.argv[2]);
+    const r = await seedAdmin(process.argv[2], process.env.SEED_ADMIN_PASSWORD || undefined);
     console.log(`Admin criado: ${r.email}`);
     console.log(`Senha temporária (aparece só agora): ${r.tempPassword}`);
     console.log("No primeiro acesso ele ativa o 2FA e troca a senha.");

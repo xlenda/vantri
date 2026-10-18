@@ -212,6 +212,17 @@ describe("seed do admin", () => {
     await expect(seedAdmin("não-é-email")).rejects.toThrow(/e-mail inválido/i);
     await expect(seedAdmin("")).rejects.toThrow(/e-mail inválido/i);
   });
+
+  it("usa a senha informada (troca continua obrigatória) e recusa senha curta sem criar o usuário", async () => {
+    const r = await seedAdmin("com.senha@vantri.test", "SenhaDemo1234567");
+    expect(r.tempPassword).toBe("SenhaDemo1234567");
+    const [u] = await d.select().from(users).where(eq(users.email, "com.senha@vantri.test"));
+    expect(u.mustChangePassword).toBe(true);
+    expect(await verifyPassword(u.passwordHash, "SenhaDemo1234567")).toBe(true);
+
+    await expect(seedAdmin("curta@vantri.test", "curta123")).rejects.toThrow(/senha/i);
+    expect(await d.select().from(users).where(eq(users.email, "curta@vantri.test"))).toHaveLength(0);
+  });
 });
 
 describe("início", () => {
